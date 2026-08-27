@@ -1,0 +1,22 @@
+# Ignore heavy data files on the external SSD
+*.csv
+*.xlsx
+*.parquet
+*.json
+data/
+datasets/
+
+# Ignore Python & R environment tracking junk
+__pycache__/
+.venv/
+.Rhistory
+.RData
+.DS_Store
+
+# Ignore installed R packages
+R-Library/
+
+# Ignore local AI and tool configuration folders
+.agents/
+.claude/
+.vscode/
