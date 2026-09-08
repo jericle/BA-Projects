@@ -2,7 +2,7 @@
 
 ## 1. Overview
 A Python application that reads flight, airport, and airline reference data from
-`Flights_from_Atlanta_2025.xlsx` (located in the project root directory) and produces an
+`/Users/eddyleung/Business_Analytics/BA Projects/BA-Projects/Flights_from_Atlanta_2025.xlsx` and produces an
 interactive dashboard analyzing On-Time Performance (OTP) for flights departing Atlanta (ATL)
 in 2025.
 
@@ -11,7 +11,7 @@ in 2025.
 
 ## 2. Data Source
 
-**File:** `Flights_from_Atlanta_2025.xlsx` (project root)
+**File:** `/Users/eddyleung/Business_Analytics/BA Projects/BA-Projects/Flights_from_Atlanta_2025.xlsx`
 
 Confirmed against the actual workbook (107,947 flight rows, all originating from ATL):
 
@@ -126,7 +126,7 @@ All 168 destination codes used in the flights tab are present here — clean joi
    likely have very few flights/year — recommend a default threshold, e.g. ≥ 50 flights, configurable).
 
 ## 7. Deliverables
-- `app.py` (or `dashboard.py`) — main dashboard application
+- `dashboard.py`— main dashboard application
 - `data_processing.py` — data loading, joining, OTP calculation, session bucketing, Oct interpolation logic
 - `PRD.md` — this document
 - `README.md` — setup/run instructions
