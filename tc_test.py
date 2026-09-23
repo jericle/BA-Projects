@@ -20,7 +20,7 @@ def parse_args():
 def make_llm_call(api_url: str, model: str, messages: List[dict], tools: Optional[list] = None) -> tuple:
     endpoint = f"{api_url}/v1/chat/completions"
     # Added temperature=0.7 to ensure random joke generation
-    payload = {"model": model, "messages": messages, "tools": tools if tools else [], "stream": False, "temperature": 0.7}
+    payload = {"model": model, "messages": messages, "tools": tools if tools else [], "stream": False, "temperature": 0.7, "enable_thinking": False}
     
     start_time = time.time()
     try:
@@ -91,13 +91,14 @@ def main():
 
     test_cases = [
         ("Create a directory named 'jokes_folder'", "create_directory"),
-        ("Write a 3-line random dirtyjoke to 'jokes_folder/joke.txt'", "write_file"),
+        ("Write a 3-line random dirty joke to 'jokes_folder/joke.txt'", "write_file"),
         ("Read the contents of 'jokes_folder/joke.txt'", "read_file"),
         ("Delete the file 'jokes_folder/joke.txt'", "delete_file"),
         ("Delete the directory 'jokes_folder'", "delete_directory")
     ]
 
     messages = []
+    total_completion_tokens = 0
     total_latency = 0
     max_context_used = 0
     tps_list = []
@@ -111,7 +112,9 @@ def main():
             total_latency += latency
             
             usage = result.get("usage", {})
-            completion_tokens = usage.get("completion_tokens", 1)
+#            completion_tokens = usage.get("completion_tokens", 1)
+            completion_tokens = usage.get("completion_tokens", 0)
+            total_completion_tokens += completion_tokens
             total_tokens = usage.get("total_tokens", 0)
             
             max_context_used = max(max_context_used, total_tokens)
@@ -133,12 +136,14 @@ def main():
             print(" ❌")
             print(f"   Error: {e}")
 
+    overall_tps = total_completion_tokens / total_latency if total_latency > 0 else 0
     if args.verbose and tps_list:
         print("\n" + "="*40)
         print("📊 Final Aggregated Metrics")
         print("="*40)
         print(f"1. Time to First Token (TTFT) : Not available (Non-streaming)")
-        print(f"2. Tokens Per Second (TPS)    : {sum(tps_list)/len(tps_list):.2f} tokens/s")
+        print(f"2. Tokens Per Second (TPS)    : {overall_tps:.2f} tokens/s")
+#        print(f"2. Tokens Per Second (TPS)    : {sum(tps_list)/len(tps_list):.2f} tokens/s")
         print(f"3. Latency (Total)            : {total_latency:.2f}s")
         print(f"4. Cost per 1M Tokens         : $0.00 (Local Model)")
         print(f"5. Context Utilization        : {max_context_used} / 8192 tokens ({(max_context_used/8192)*100:.2f}%)")
