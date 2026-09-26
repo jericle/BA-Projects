@@ -95,15 +95,37 @@
   .chip.hit { color: var(--accent); border-color: #2f4b57; }
 
   /* ---------- layout ---------- */
-  /* KPI cards occupy their own full-width band; this row is headlines + the
-     right-hand panel underneath it. */
-  main {
-    display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
-    gap: 16px; padding: 16px 20px 40px; align-items: start;
+  /* The KPI band is global and sits above the tab bar. Below it each panel owns
+     the full page width on its own tab, so no panel is ever squeezed into a
+     column beside another one. */
+  nav.tabs {
+    display: flex; align-items: stretch; gap: 3px; margin: 14px 20px 0;
   }
-  @media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
+  .tab {
+    display: flex; align-items: center; gap: 8px; cursor: pointer;
+    background: var(--panel); color: var(--muted);
+    border: 1px solid var(--line); border-radius: 5px 5px 0 0;
+    padding: 8px 16px; font: inherit; font-size: 12px;
+    letter-spacing: 0.14em; text-transform: uppercase;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.on {
+    background: var(--panel-2); color: var(--accent);
+    box-shadow: inset 0 2px 0 var(--accent);
+  }
+  .tab-key {
+    font-size: 10px; line-height: 15px; color: var(--dim);
+    border: 1px solid var(--line); border-radius: 2px; padding: 0 4px;
+  }
+  .tab.on .tab-key { color: var(--accent); border-color: #2f4b57; }
+  .tab-hint { align-self: center; color: var(--dim); font-size: 11px; }
 
-  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 5px; }
+  main { padding: 0 20px 40px; }
+  .panel {
+    display: none;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 5px;
+  }
+  .panel.on { display: block; }
   .panel > h2 {
     margin: 0; padding: 9px 13px; font-size: 11px; letter-spacing: 0.16em;
     text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--line);
@@ -213,12 +235,25 @@
   .oi { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--dim); margin-top: 2px; }
 
   /* ---------- prices ---------- */
+  /* The pre-market tab is full width, so the watchlist groups run side by side
+     instead of one long list. auto-fit ties the column count to the window, and
+     align-items:start stops a short group from stretching to match a tall one.
+     min() keeps the floor below a phone's content width, where a hard 320px
+     track would push a horizontal scrollbar onto the page. */
+  #prices {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+    gap: 0 18px; align-items: start;
+  }
+  .group { min-width: 0; }
   .group-title {
     padding: 7px 13px; font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase;
     color: var(--accent); background: #1b2027; border-bottom: 1px solid var(--line);
     border-top: 1px solid var(--line);
   }
-  .group-title:first-child { border-top: none; }
+  /* Anchored on .group, not .group-title: inside a grid the first group of each
+     column is not :first-child, so only the very first group loses its rule. */
+  .group:first-child .group-title { border-top: none; }
   .row {
     display: grid; grid-template-columns: 62px 1fr 74px 66px;
     gap: 8px; align-items: center;
@@ -289,13 +324,15 @@
   <div class="stacks" id="kpiStacks"></div>
 </div>
 
+<nav class="tabs" id="tabs" role="tablist" aria-label="dashboard panels"></nav>
+
 <main>
-  <section class="panel">
+  <section class="panel on" id="panel-headlines" role="tabpanel" aria-label="Top Headlines">
     <h2><span>Top headlines</span><span class="note" id="newsNote"></span></h2>
     <div class="news" id="news"></div>
   </section>
 
-  <section class="panel">
+  <section class="panel" id="panel-premarket" role="tabpanel" aria-label="Pre-Market">
     <h2><span>Pre-market</span><span class="note" id="priceNote"></span></h2>
     <div id="prices"></div>
   </section>
@@ -339,6 +376,47 @@ let DATA = null;
 let selected = null;
 let countdown = 0;
 let busy = false;
+
+// ---------------------------------------------------------------- panel tabs
+// One tab per panel, so each one gets the full page width. The bar is rendered
+// from this list, which keeps the markup, the keyboard shortcut and the hash in
+// step: adding a panel here is the only edit needed to give it a tab.
+const TABS = [
+  { id: "headlines", label: "Top Headlines", key: "1", note: "ranked market-moving stories" },
+  { id: "premarket", label: "Pre-Market", key: "2", note: "watchlist price action" },
+];
+const panelId = (id) => `panel-${id}`;
+let activeTab = TABS[0].id;
+
+const tabFromHash = () => {
+  const raw = String((globalThis.location && globalThis.location.hash) || "")
+    .replace(/^#\/?/, "").toLowerCase();
+  return TABS.some((t) => t.id === raw) ? raw : null;
+};
+
+function selectTab(id) {
+  activeTab = (TABS.find((t) => t.id === id) || TABS[0]).id;
+  // replaceState, not `location.hash =`: the page repolls every 30s, and a real
+  // history entry per switch would make Back useless within a session.
+  try { history.replaceState(null, "", "#" + activeTab); } catch (e) { /* no history API */ }
+  renderTabs();
+}
+
+function renderTabs() {
+  $("tabs").innerHTML =
+    TABS.map((t) => `<button class="tab${t.id === activeTab ? " on" : ""}" type="button"
+        role="tab" data-tab="${t.id}" aria-selected="${t.id === activeTab}"
+        aria-controls="${panelId(t.id)}" title="${esc(t.note)} — press ${t.key}">
+        <span class="tab-key">${t.key}</span>${esc(t.label)}
+      </button>`).join("")
+    + `<div class="spacer"></div>`
+    + `<span class="tab-hint">press 1-${TABS.length} to switch</span>`;
+
+  for (const t of TABS) $(panelId(t.id)).classList.toggle("on", t.id === activeTab);
+
+  $("tabs").querySelectorAll("[data-tab]").forEach((el) =>
+    el.addEventListener("click", () => selectTab(el.dataset.tab)));
+}
 
 // ---------------------------------------------------------------- sparkline
 function sparkline(points, w = 100, h = 26) {
@@ -663,7 +741,8 @@ function renderPrices() {
 
   let html = "";
   for (const [group, rows] of byGroup) {
-    html += `<div class="group-title">${esc(group)}</div>`;
+    // Each group is its own block so the grid can flow them into columns.
+    html += `<div class="group"><div class="group-title">${esc(group)}</div>`;
     for (const q of rows) {
       const gap = q.gapPct;
       const isSel = selected === q.symbol ? " sel" : "";
@@ -688,6 +767,7 @@ function renderPrices() {
         </div>
       </div>`;
     }
+    html += `</div>`;
   }
   host.innerHTML = html;
 
@@ -885,13 +965,28 @@ $("scrim").addEventListener("click", closeDetail);
 document.addEventListener("keydown", (e) => {
   if (e.key === "r" && !e.metaKey && !e.ctrlKey) load(true);
   if (e.key === "Escape") closeDetail();
+  // Digits jump between tabs. Skipped with a modifier so ⌘1 and friends still
+  // reach the browser, and a shifted digit ("!") is not a bare number.
+  if (!e.metaKey && !e.ctrlKey && !e.altKey && /^[1-9]$/.test(String(e.key))) {
+    const t = TABS[Number(e.key) - 1];
+    if (t) { selectTab(t.id); if (e.preventDefault) e.preventDefault(); }
+  }
 });
+// A hand-typed or shared #tab link reopens that tab.
+if (typeof globalThis.addEventListener === "function") {
+  globalThis.addEventListener("hashchange", () => {
+    const id = tabFromHash();
+    if (id && id !== activeTab) selectTab(id);
+  });
+}
 
 setInterval(() => {
   if (countdown > 0) { countdown -= 1; drawCountdown(); }
 }, 1000);
 setInterval(() => load(false), 30000);
 
+activeTab = tabFromHash() || TABS[0].id;
+renderTabs();
 load(false);
 </script>
 </body>

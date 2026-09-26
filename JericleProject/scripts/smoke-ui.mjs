@@ -12,27 +12,70 @@ const mkClassList = () => ({
   add(c) { this._s.add(c); },
   remove(c) { this._s.delete(c); },
   contains(c) { return this._s.has(c); },
-  toggle(c) { this._s.has(c) ? this._s.delete(c) : this._s.add(c); },
+  // The force argument is load-bearing: the tab code calls toggle(c, isActive),
+  // and a toggle that ignored it would flip the wrong panel on every switch.
+  toggle(c, force) {
+    const on = force === undefined ? !this._s.has(c) : !!force;
+    if (on) this._s.add(c); else this._s.delete(c);
+    return on;
+  },
 });
 
 // The page's element ids, so a rename fails the run instead of silently creating
 // an empty stub and passing.
 const KNOWN_IDS = new Set([
   "phaseBadge", "countdown", "clocks", "trending", "refreshBtn",
-  "news", "newsNote", "priceNote", "prices", "foot",
+  "news", "newsNote", "priceNote", "prices", "foot", "tabs",
+  "panel-headlines", "panel-premarket",
   "scrim", "detail", "dTitle", "dBody", "dClose", "kpiStacks",
 ]);
+
+// The page renders markup as strings and then queries it back to attach
+// listeners. The stub answers `[data-*]` selectors by scanning the host's own
+// innerHTML and hands back elements that remember their handlers, which is
+// enough to click a tab for real rather than just assert on the markup.
+// Elements are cached per host and invalidated when the markup changes, because
+// a real querySelectorAll re-walks the DOM: the same query before and after a
+// re-render must not hand back the same node with stale listeners attached.
+const attrState = new WeakMap();
+const attrStubs = (host, sel) => {
+  const m = /^\[data-([A-Za-z-]+)\]$/.exec(sel);
+  if (!m) return [];
+  const attr = m[1];
+  let st = attrState.get(host);
+  if (!st || st.html !== host.innerHTML) {
+    attrState.set(host, (st = { html: host.innerHTML, els: new Map() }));
+  }
+  const out = [];
+  for (const hit of host.innerHTML.matchAll(new RegExp(`data-${attr}="([^"]+)"`, "g"))) {
+    const key = `${attr}|${hit[1]}`;
+    if (!st.els.has(key)) {
+      st.els.set(key, {
+        dataset: { [attr]: hit[1] },
+        classList: mkClassList(),
+        _h: {},
+        addEventListener(t, f) { (this._h[t] ||= []).push(f); },
+        fire(t) { (this._h[t] || []).forEach((f) => f({})); },
+      });
+    }
+    out.push(st.els.get(key));
+  }
+  return out;
+};
 
 const nodes = new Map();
 const node = (id) => {
   if (!KNOWN_IDS.has(id)) throw new Error(`page asked for unknown element #${id}`);
   if (!nodes.has(id)) {
-    nodes.set(id, {
-      id, innerHTML: "", textContent: "", disabled: false,
+    const self = {
+      id, innerHTML: "", textContent: "", disabled: false, dataset: {},
       classList: mkClassList(), style: {},
-      querySelectorAll: () => [{ classList: mkClassList(), addEventListener: () => {} }],
-      addEventListener: () => {},
-    });
+      _h: {},
+      addEventListener(t, f) { (self._h[t] ||= []).push(f); },
+      fire(t) { (self._h[t] || []).forEach((f) => f({})); },
+      querySelectorAll(sel) { return attrStubs(self, sel); },
+    };
+    nodes.set(id, self);
   }
   return nodes.get(id);
 };
@@ -40,9 +83,13 @@ const node = (id) => {
 // The per-column walls are located with document.querySelector(`[data-walls="SYM"]`),
 // so the stub keeps a registry of those elements too.
 const wallNodes = new Map();
+const docHandlers = new Map();
 globalThis.document = {
   getElementById: (id) => node(id),
-  addEventListener: () => {},
+  addEventListener(type, fn) {
+    if (!docHandlers.has(type)) docHandlers.set(type, []);
+    docHandlers.get(type).push(fn);
+  },
   querySelector: (sel) => {
     const m = /\[data-walls="([A-Z.\-]+)"\]/.exec(sel);
     if (!m) return null;
@@ -57,6 +104,19 @@ globalThis.document = {
     return wallNodes.get(sym);
   },
 };
+// location/history back the tab deep-link, and window-level listeners are
+// recorded so the test can fire a real `hashchange`.
+globalThis.location = { hash: "" };
+globalThis.history = { replaceState: (a, b, url) => { globalThis.location.hash = url; } };
+const winHandlers = new Map();
+globalThis.addEventListener = (type, fn) => {
+  if (!winHandlers.has(type)) winHandlers.set(type, []);
+  winHandlers.get(type).push(fn);
+};
+globalThis.fireWindow = (type) =>
+  (winHandlers.get(type) || []).forEach((fn) => fn({ type }));
+globalThis.fireDocument = (type, ev) =>
+  (docHandlers.get(type) || []).forEach((fn) => fn(ev));
 const realSetTimeout = globalThis.setTimeout;
 globalThis.setInterval = () => 0;
 const optionsPayload = {
@@ -79,7 +139,9 @@ process.on("uncaughtException", (e) => { note(e); process.exit(1); });
 
 let api;
 try {
-  api = new Function(script + "\n;return {load, openDetail, closeDetail, sparkline, fmtPct, fmtAge, sentClass};")();
+  api = new Function(script + `
+;return {load, openDetail, closeDetail, sparkline, fmtPct, fmtAge, sentClass,
+         selectTab, renderTabs, tabFromHash, TABS, get activeTab() { return activeTab; }};`)();
 } catch (e) {
   console.error("script threw during evaluation:\n" + e.stack);
   process.exit(1);
@@ -101,8 +163,22 @@ const chrome = node("clocks").textContent + " | " + node("phaseBadge").innerHTML
 const foot = node("foot").innerHTML;
 const trending = node("trending").innerHTML;
 const kpi1 = node("kpiStacks").innerHTML;
+const tabs = node("tabs").innerHTML;
 await new Promise((r) => realSetTimeout(r, 120));
 const painted = [...wallNodes.values()].map((n) => n.outerHTML).join("");
+
+const tabBtn = (host, id) => host.querySelectorAll("[data-tab]")
+  .find((el) => el.dataset.tab === id);
+// A real click, through the listener the page attached to that button.
+const clickTab = (id) => {
+  const btn = tabBtn(node("tabs"), id);
+  if (!btn) throw new Error(`no tab button for #${id}`);
+  btn.fire("click");
+  return api.activeTab === id;
+};
+// The button attributes are wrapped across lines in the template, so the markup
+// assertions run against a whitespace-flattened copy.
+const tabsFlat = tabs.replace(/\s+/g, " ");
 
 const checks = [
   ["news cards rendered", (news.match(/class="item"/g) || []).length > 0],
@@ -142,6 +218,80 @@ const checks = [
   ["painted walls show open interest", /OI /.test(painted)],
   ["painted walls show put/call ratio", /pc \d/.test(painted)],
   ["painted walls no NaN", !/NaN|undefined/.test(painted)],
+
+  // ---- panel tabs ----
+  ["a tab per panel", api.TABS.length === 2
+    && ["headlines", "premarket"].every((id) => tabs.includes(`data-tab="${id}"`))],
+  ["tab bar is a tablist", node("tabs").innerHTML.includes('role="tab"')
+    && html.includes('role="tablist"')],
+  ["each tab names the panel it controls",
+    (tabs.match(/aria-controls="panel-[a-z]+"/g) || []).length === 2],
+  ["opens on top headlines", api.activeTab === "headlines"],
+  ["exactly one tab is selected", (tabs.match(/aria-selected="true"/g) || []).length === 1
+    && (tabs.match(/aria-selected="false"/g) || []).length === 1],
+  ["the selected tab carries the on class",
+    /class="tab on"[^>]*data-tab="headlines"/.test(tabsFlat)],
+  ["only the active panel is visible",
+    node("panel-headlines").classList.contains("on")
+      && !node("panel-premarket").classList.contains("on")],
+  ["panels are hidden by default, not by script",
+    html.includes('class="panel on" id="panel-headlines"')
+      && /class="panel" id="panel-premarket"/.test(html)],
+  ["the panels are no longer a two-column grid",
+    !html.includes("grid-template-columns: minmax(0, 1.35fr)")],
+  // click the second tab for real and re-read the rendered state
+  ["clicking a tab switches panel", clickTab("premarket")],
+  ["clicking a tab moves the on-class",
+    node("panel-premarket").classList.contains("on")
+      && !node("panel-headlines").classList.contains("on")],
+  ["clicking a tab rewrites the url hash", globalThis.location.hash === "#premarket"],
+  ["the url hash drives the initial tab", (() => {
+    globalThis.location.hash = "#headlines";
+    return api.tabFromHash() === "headlines";
+  })()],
+  ["a junk hash falls back rather than blanking the page", (() => {
+    globalThis.location.hash = "#nope";
+    return api.tabFromHash() === null;
+  })()],
+  ["hashchange reopens the linked tab", (() => {
+    api.selectTab("headlines");
+    globalThis.location.hash = "#premarket";
+    globalThis.fireWindow("hashchange");
+    return api.activeTab === "premarket" && node("panel-premarket").classList.contains("on");
+  })()],
+  ["digit 2 jumps to the pre-market tab", (() => {
+    globalThis.location.hash = "";
+    api.selectTab("headlines");
+    globalThis.fireDocument("keydown", { key: "2" });
+    return api.activeTab === "premarket";
+  })()],
+  ["digit 1 jumps back to top headlines", (() => {
+    globalThis.fireDocument("keydown", { key: "1" });
+    return api.activeTab === "headlines";
+  })()],
+  ["a shifted digit is not a tab shortcut", (() => {
+    globalThis.fireDocument("keydown", { key: "!", shiftKey: true });
+    return api.activeTab === "headlines";
+  })()],
+  ["cmd+digit is left to the browser", (() => {
+    globalThis.fireDocument("keydown", { key: "2", metaKey: true });
+    return api.activeTab === "headlines";
+  })()],
+  ["a digit past the last tab does nothing", (() => {
+    globalThis.fireDocument("keydown", { key: "9" });
+    return api.activeTab === "headlines";
+  })()],
+  ["both panels are still populated while hidden", news.length > 0 && prices.length > 0],
+
+  // ---- pre-market multi-column layout ----
+  ["each watchlist group is its own column block",
+    (prices.match(/class="group"/g) || []).length === 3],
+  ["group titles are inside their group block",
+    (prices.match(/class="group"><div class="group-title">/g) || []).length === 3],
+  ["pre-market is a responsive multi-column grid",
+    /#prices\s*\{[^}]*display:\s*grid[^}]*repeat\(auto-fit,\s*minmax\(min\(320px, 100%\)/.test(html)],
+  ["only the first group drops its top rule",
+    html.includes(".group:first-child .group-title")],
 ];
 
 // Detail drawer

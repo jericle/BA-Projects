@@ -48,6 +48,24 @@
   JSON float, which serde will not coerce into `i64`.
 * **OCC strike fields are in thousandths**, confirmed by cross-reference: Yahoo reports
   `NVDA260925C00050000` as strike 50.0, not 500.
+* **One tab per panel** (this milestone). The two panels used to share a row —
+  headlines in a 1.35fr column, pre-market in a 1fr one — so neither ever got
+  room for what it had to show. Each is now its own full-width tab, `TOP HEADLINES`
+  and `PRE_MARKET`, with the KPI band still global above them. The tab bar is
+  rendered from one `TABS` array, so the buttons, the digit shortcuts and the URL
+  hash cannot drift apart; the active tab is written with `replaceState` rather
+  than `location.hash` because the page repolls every 30s and a real history entry
+  per switch would make Back useless. Panels are hidden with `.panel{display:none}`
+  and the default `on` state is in the markup, so the first paint shows one panel
+  without waiting on JS.
+* **Pre-market spends its extra width on columns, not new fields.** The three
+  watchlist groups become grid items (`repeat(auto-fit, minmax(min(320px,100%),1fr))`)
+  so all 22 symbols are on screen without scrolling, and the per-row data is
+  unchanged. `min()` rather than a hard 320px floor because a fixed track pushes
+  a horizontal scrollbar onto a phone. The `:first-child` rule moved from
+  `.group-title` to `.group` when the groups gained a wrapper: inside a grid, the
+  first group of each column is not `:first-child`, so anchoring it on the title
+  would have stripped the separator from all three.
 
 ## 1. Goal
 
@@ -185,9 +203,16 @@ accent, `#66bb6a` / `#ef5350` for up/down).
 
 - **Header** — phase badge, split-flap countdown to 09:30 ET, current time in both
   ET and local time, data freshness, manual refresh
+- **KPI band** — always visible, above the tabs: the four session cards
+  (highest-volume buy / sell, top gainer / loser) each directly above the option
+  walls for that same symbol
+- **Panel tabs** — one tab per panel, each the full page width. `TOP HEADLINES`
+  and `PRE_MARKET`, switchable by click, by digit `1`–`9`, or by a `#tab` URL
+  fragment so a link reopens the same panel
 - **Top 20 news** — headline, publisher, age, sentiment chip, tagged tickers, salience
   bar (breakdown on hover)
-- **Pre-market table** — grouped by watchlist group; price, gap %, sparkline, news count
+- **Pre-market table** — watchlist groups side by side as columns; price, gap %,
+  sparkline, news count
 - **Ticker detail** — click a row: full 04:00→09:30 ET price chart with news markers
   plotted at publish time, plus that ticker's news list
 
@@ -215,7 +240,7 @@ Editable in `config.toml`. Tickers not in a group fall into "Other".
 
 1. `config` + `marketclock` + Yahoo chart → quote pipeline
 2. Google News RSS + scoring → top-20 pipeline
-3. HTML page: header, news cards, price table
+3. HTML page: header, KPI band, panel tabs, news cards, price table
 4. Yahoo per-ticker news + ticker tagging + sparklines + ticker timeline
 5. SQLite history
 6. launchd + pre-open alert

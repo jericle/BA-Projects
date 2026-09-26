@@ -243,4 +243,6 @@ curl -s localhost:8787/api/dashboard -o /tmp/dash.json
 node scripts/smoke-ui.mjs
 ```
 
-Keyboard: `r` refresh, `Esc` close the drawer.
+Keyboard: `1`–`2` switch panels, `r` refresh, `Esc` close the drawer. The active
+panel is kept in the URL fragment, so `localhost:8787/#premarket` opens straight
+into the pre-market tab.
