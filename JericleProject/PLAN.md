@@ -56,8 +56,16 @@
   a ranked list of defined-risk structures — bull/bear call and put spreads at three
   widths, bull/bear put spreads, iron condor, call butterfly, long straddle — with the
   payoff at expiry plotted, the breakeven(s), max profit, max loss, reward-to-risk,
-  probability of profit, and a per-leg 50%-capture unwind price all marked on one axis.
+  probability of profit, with spot and the breakevens marked on one axis.
   Any listed expiry can be selected.
+* **Per-leg unwind prices were dropped from the diagram** (v0.4.1). The per-leg
+  "half the maximum value" price sits a long way from the body — a call wing at 1.5x
+  its strike on a two-week expiry is nowhere near the interesting region — so drawing
+  every leg's marker turned the axis into a row of labels that no longer meant anything
+  at a glance. The strategy-level breakevens are the prices you would actually act at,
+  so those are what is marked, alongside spot. The per-leg figures are still computed
+  and returned in the payload, since re-deriving them is a nuisance for any later
+  caller.
 * **"Recommend" had to be given an objective, and the objective is deliberately
   narrow.** Candidates are ranked by `probability of profit × reward-to-risk`. That is
   a statement about the *shape* of a trade — how often it wins against how much it
@@ -348,7 +356,7 @@ accent, `#66bb6a` / `#ef5350` for up/down).
   one credit per opened symbol; the list itself reuses Yahoo data and is free
 - **Option strategies** — click a symbol for ranked defined-risk structures at any
   listed expiry. Each card carries its payoff at expiry, breakevens, max profit, max
-  loss, reward-to-risk, probability of profit, and a per-leg unwind price, all marked
+  loss, reward-to-risk, and probability of profit, with spot and the breakevens marked
   on one axis. From Yahoo's chain, bid/ask mid and implied volatility
 
 ## 9. Automation

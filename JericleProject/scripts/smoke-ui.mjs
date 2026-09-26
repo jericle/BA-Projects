@@ -535,7 +535,10 @@ let failEarly = 0;
       body.includes("payoff-pos") && body.includes("payoff-neg")],
     ["strategies: spot is marked", body.includes("spot-line")],
     ["strategies: breakeven markers drawn", body.includes("be-line")],
-    ["strategies: per-leg unwind markers drawn", body.includes("unwind-line")],
+    // Per-leg unwind prices stay in the payload but are no longer drawn: they sat
+    // several strikes off the body and cluttered the axis with labels.
+    ["strategies: per-leg unwind markers are not drawn",
+      !body.includes("unwind-line") && !body.includes(">unwind<")],
     // The regression guard, in markup: a 2-lot body must render as 2x, and the
     // rendered card must not carry an implausible ratio.
     ["strategies: the ratio leg renders its size", body.includes("2x-call")],

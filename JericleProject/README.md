@@ -253,8 +253,9 @@ into the pre-market tab.
 
 The **OPTION STRATEGIES** tab builds defined-risk option structures for any
 watchlist symbol and ranks them by probability of profit × reward-to-risk. Each
-card plots payoff at expiry and marks the breakeven(s), max profit, max loss and a
-per-leg unwind price on one axis. Any listed expiry can be selected.
+card plots payoff at expiry and shows max profit, max loss, reward-to-risk and
+probability of profit, with spot and the breakeven prices marked on the axis.
+Any listed expiry can be selected.
 
 The library is defined-risk only, so max profit, max loss and the ratio are exact.
 Probability is Black-Scholes on the chain's own implied volatility with zero drift,

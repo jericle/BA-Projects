@@ -214,8 +214,10 @@ pub struct Metrics {
     pub breakevens: Vec<f64>,
     /// Probability the strategy finishes in profit at expiry, 0..1.
     pub prob_profit: f64,
-    /// Underlying price at which each leg has lost half of its maximum value.
-    /// A common "take half the profit" management rule.
+    /// Underlying price at which each leg is worth half of its maximum value —
+    /// the "take half the profit" management rule. Computed and returned, but no
+    /// longer drawn on the payoff diagram: the prices sit well away from the body
+    /// and the axis became a row of labels. `breakevens` is what the chart shows.
     pub leg_unwind: Vec<LegUnwind>,
     pub net_credit: f64,
     pub net_debit: f64,
@@ -457,7 +459,7 @@ impl Strategy {
                 kind: l.kind,
                 position: l.position,
                 price: half_value_price(l),
-                max_value: leg_max_value(l),
+                max_value: l.strike,
             })
             .collect();
 
@@ -477,29 +479,24 @@ impl Strategy {
     }
 }
 
-/// A leg's best possible value at expiry, per share. For a long leg this is
-/// unbounded, so this reports the *finite* reference point used for the
-/// half-value marker instead: the value at the far end of the plotted range.
-fn leg_max_value(l: &Leg) -> f64 {
-    match l.kind {
-        OptionKind::Call => l.strike - l.premium,
-        OptionKind::Put => l.strike - l.premium,
-    }
-}
-
 /// Underlying price at which a leg is worth half of its maximum.
 ///
 /// For a long call the value grows without limit, so "half of maximum" is only
 /// meaningful against a chosen reference. This uses the leg's own strike: the
 /// price at which the intrinsic value is half the strike. That is a stable,
-/// explainable rule and is labelled as an approximation in the UI.
+/// explainable rule.
+///
+/// Not currently drawn. The per-leg marker was removed from the payoff diagram
+/// because these prices sit a long way from the body and the axis turned into a
+/// row of labels; the strategy-level breakevens are the actionable ones. The
+/// field is still computed and returned, since it is cheap, still correct, and a
+/// caller wanting the detail should not have to re-derive it.
 fn half_value_price(l: &Leg) -> f64 {
     match (l.kind, l.position > 0.0) {
         (OptionKind::Call, true) => l.strike * 1.5,
         (OptionKind::Put, true) => l.strike * 0.5,
         // A short leg is worth most when the underlying moves away from it; the
-        // half-capture point sits a half-strike beyond the strike in that
-        // direction.
+        // half-capture point sits a half-strike beyond the strike in that direction.
         (OptionKind::Call, false) => l.strike * 1.5,
         (OptionKind::Put, false) => l.strike * 0.5,
     }
