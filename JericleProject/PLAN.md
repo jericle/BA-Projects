@@ -27,7 +27,8 @@
   lands it in that table; a misplaced key is now a hard parse error.
 * **Verification added:** 29 Rust unit tests (calendar, DST, scoring, RSS, option walls,
   OCC parsing) and `scripts/smoke-ui.mjs`, which runs the page's real JavaScript against
-  the live API payload under a stub DOM and asserts 27 rendering invariants.
+  the live API payload under a stub DOM and asserts 66 rendering invariants (27 at the
+  time of writing, 66 after the tab milestone).
 * **KPI cards added** (second request): row 1 is the session extremes. The first cut used
   "most traded / least traded", which is high volume vs *low* volume and not what a
   High Volume Buy/Sell read is actually for. Corrected to the directional definition:
@@ -66,6 +67,13 @@
   `.group-title` to `.group` when the groups gained a wrapper: inside a grid, the
   first group of each column is not `:first-child`, so anchoring it on the title
   would have stripped the separator from all three.
+* **§3's file tree was stale** (v0.2.1). It still described the pre-option-walls
+  layout, so `options.rs`, `pipeline.rs`, both option sources, `install.sh` and the
+  smoke test were absent — the build notes above described code the architecture
+  section did not contain. Now checked against `find`: every file on disk appears in
+  the tree and every entry in the tree exists. Anything added after a milestone
+  needs the tree updated in the same change, or the two halves of the plan stop
+  describing the same program.
 
 ## 1. Goal
 
@@ -112,12 +120,17 @@ Rust daemon, one binary, three subcommands. Browser UI on `localhost:8787`.
 ```
 JericleProject/
 ├── Cargo.toml
+├── Cargo.lock                 committed: pinned deps make the binary reproducible
 ├── config.toml                watchlist groups, port, refresh cadence, tuning
 ├── PLAN.md                    this file
 ├── README.md                  how to run, tune, install launchd
+├── BUILD-REPORT.md            milestone build notes and verification results
 ├── launchd/
 │   ├── com.jericle.opendash.plist        KeepAlive the daemon
+│   ├── install.sh                 install / --sync / --uninstall
 │   └── preopen_alert.sh                  DST-safe 8:25 ET → macOS banner
+├── scripts/
+│   └── smoke-ui.mjs             headless run of the page's JS against a live payload
 ├── src/
 │   ├── main.rs                serve | snapshot | alert-once
 │   ├── config.rs              config.toml loading + defaults
@@ -125,11 +138,16 @@ JericleProject/
 │   ├── http.rs                shared reqwest client, throttle, retry
 │   ├── model.rs               serialisable types
 │   ├── score.rs               clustering, ticker tagging, sentiment, salience
+│   ├── options.rs             option wall derivation from a chain (pure, no network)
 │   ├── store.rs               SQLite history (rusqlite)
+│   ├── pipeline.rs            the refresh cycle: quotes + news in, Dashboard out
 │   ├── llm.rs                 optional local-LLM rerank
 │   ├── sources/
+│   │   ├── mod.rs             source module list
 │   │   ├── yahoo_chart.rs     pre-market quotes
 │   │   ├── yahoo_news.rs      per-ticker news
+│   │   ├── yahoo_options.rs   option chain via Yahoo's cookie + crumb session
+│   │   ├── cboe.rs            fallback option chain from Cboe's OPRA feed
 │   │   ├── gnews.rs           market-wide RSS
 │   │   └── trending.rs        Yahoo trending tickers
 │   └── web/
