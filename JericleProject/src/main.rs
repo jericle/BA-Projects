@@ -14,6 +14,7 @@ mod model;
 mod options;
 mod pipeline;
 mod score;
+mod secrets;
 mod sources;
 mod store;
 mod web;
@@ -53,17 +54,28 @@ async fn main() -> Result<()> {
     }
 
     let (cfg, cfg_path) = Config::load(config_arg.as_deref())?;
+    // Credentials are resolved once, here, so every subcommand and the startup
+    // banner report on the same file. The key itself is never printed.
+    let (sec, sec_path) = secrets::Secrets::load(std::env::var("OPENDASH_SECRETS").ok().as_deref());
+    if let Some(p) = &sec_path {
+        println!(
+            "opendash  secrets: {} ({} provider key(s): {})",
+            p.display(),
+            sec.providers.len(),
+            sec.provider_names().join(", ")
+        );
+    }
 
     match cmd.as_str() {
-        "serve" => serve(cfg, cfg_path).await,
+        "serve" => serve(cfg, cfg_path, sec, sec_path).await,
         "snapshot" | "prices" => {
-            let state = AppState::new(cfg)?;
+            let state = AppState::with_secrets(cfg, sec, sec_path)?;
             let d = pipeline::refresh(&state).await?;
             print_summary(&d, cmd == "prices");
             Ok(())
         }
         "alert-once" => {
-            let state = AppState::new(cfg)?;
+            let state = AppState::with_secrets(cfg, sec, sec_path)?;
             let d = pipeline::refresh(&state).await?;
             let body = pipeline::briefing(&d);
             notify(&body);
@@ -116,12 +128,28 @@ fn bind_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
     Ok(vec![addr])
 }
 
-async fn serve(cfg: Config, cfg_path: PathBuf) -> Result<()> {
+async fn serve(
+    cfg: Config,
+    cfg_path: PathBuf,
+    sec: secrets::Secrets,
+    sec_path: Option<PathBuf>,
+) -> Result<()> {
     let addrs = bind_addrs(&cfg.host, cfg.port)?;
 
-    let state = AppState::new(cfg)?;
+    let state = AppState::with_secrets(cfg, sec, sec_path)?;
     println!("opendash  config: {}", cfg_path.display());
     println!("opendash  market phase: {}", marketclock::phase(&marketclock::now_et()).as_str());
+    println!(
+        "opendash  price history: {}",
+        if state.series_enabled {
+            format!(
+                "ready ({} credit(s)/min)",
+                state.config.twelvedata.rate_limit_per_minute
+            )
+        } else {
+            "unavailable".to_string()
+        }
+    );
 
     tokio::spawn(refresh_loop(Arc::clone(&state)));
 

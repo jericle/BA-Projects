@@ -19,10 +19,34 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 BIN_SRC="$PROJECT/target/release/opendash"
 BIN_DST="$HOME/.local/bin/opendash"
 RUNTIME="$HOME/.opendash"
+SECRETS="$RUNTIME/secrets.toml"
 DOMAIN="gui/$(id -u)"
 
 log()  { print -r -- "==> $*" }
 fail() { print -r -- "error: $*" >&2; exit 1; }
+
+# Make sure a secrets file exists and is private.
+#
+# Created from the template with 600 rather than a normal umask, because the mode
+# is the only thing stopping another local account from reading the API keys. An
+# existing file is never overwritten, and a loose mode is tightened — silently
+# leaving a world-readable key in place would be the one outcome worth avoiding.
+ensure_secrets() {
+  mkdir -p "$RUNTIME"
+  chmod 700 "$RUNTIME" 2>/dev/null || true
+  if [ ! -f "$SECRETS" ]; then
+    install -m 600 "$PROJECT/secrets.example.toml" "$SECRETS" 2>/dev/null \
+      && log "created $SECRETS (mode 600) — add your API keys" \
+      || log "no secrets.example.toml to copy; skipping $SECRETS"
+    return
+  fi
+  local mode
+  mode=$(stat -f '%Lp' "$SECRETS" 2>/dev/null || echo "")
+  if [ -n "$mode" ] && [ "$mode" != "600" ]; then
+    chmod 600 "$SECRETS"
+    log "tightened $SECRETS from mode $mode to 600"
+  fi
+}
 
 uninstall() {
   log "unloading $LABEL"
@@ -47,6 +71,7 @@ case "${1:-install}" in
     # launchd can actually read.
     cp "$PROJECT/config.toml" "$RUNTIME/config.toml"
     log "synced binary and config from $PROJECT"
+    ensure_secrets
     ;;
   install)
     command -v cargo >/dev/null 2>&1 && (cd "$PROJECT" && cargo build --release) \
@@ -57,6 +82,7 @@ case "${1:-install}" in
     [ -f "$RUNTIME/config.toml" ] || cp "$PROJECT/config.toml" "$RUNTIME/config.toml"
     log "installed binary to $BIN_DST"
     log "runtime config at $RUNTIME/config.toml"
+    ensure_secrets
     ;;
   *) fail "usage: $0 [--sync|--uninstall]" ;;
 esac
@@ -80,6 +106,11 @@ cat > "$PLIST" <<PLIST_EOF
     <dict>
         <key>OPENDASH_CONFIG</key>
         <string>$RUNTIME/config.toml</string>
+        <!-- Points at the secrets file explicitly rather than relying on $HOME:
+             launchd does not always expand it, and a missing key here looks
+             identical to a wrong key. -->
+        <key>OPENDASH_SECRETS</key>
+        <string>$SECRETS</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>

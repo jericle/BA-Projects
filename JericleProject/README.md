@@ -233,7 +233,8 @@ Rows older than `keep_days` are pruned daily.
 ## Development
 
 ```sh
-cargo test                 # 29 unit tests: calendar, DST, scoring, RSS, option walls, OCC
+cargo test                 # 61 unit tests: calendar, DST, scoring, RSS, option walls, OCC,
+                           # secrets redaction, credit counter, Twelve Data parsing
 cargo run -- snapshot      # live end-to-end run, prints a text summary
 OPENDASH_VERBOSE=1 cargo run -- snapshot   # per-feed candidate counts
 
@@ -243,6 +244,36 @@ curl -s localhost:8787/api/dashboard -o /tmp/dash.json
 node scripts/smoke-ui.mjs
 ```
 
-Keyboard: `1`–`2` switch panels, `r` refresh, `Esc` close the drawer. The active
+Keyboard: `1`–`3` switch panels, `r` refresh, `Esc` close the drawer. The active
 panel is kept in the URL fragment, so `localhost:8787/#premarket` opens straight
 into the pre-market tab.
+
+## API keys
+
+News and quotes need no key. The **PRICE HISTORY** tab uses Twelve Data, which
+does — and the key is deliberately kept out of this repository, because
+`BA-Projects` is public on GitHub and a committed key is a key anyone can clone.
+
+```sh
+cp secrets.example.toml ~/.opendash/secrets.toml
+chmod 600 ~/.opendash/secrets.toml
+$EDITOR ~/.opendash/secrets.toml      # add your key
+./launchd/install.sh --sync
+```
+
+```toml
+[providers.twelvedata]
+api_key = "your-key-here"
+```
+
+Providers are a map, so adding a service needs no code change. `launchd/install.sh`
+creates the file at mode 600 if it is missing and tightens it if the mode is loose;
+the daemon also warns at startup if the file is group- or world-readable.
+
+The key never reaches the browser: the page calls `/api/series/{symbol}` on this
+origin, the daemon sends the key as an `Authorization` header (never a query
+string, so it stays out of access logs and error messages), and the response
+carries only price bars.
+
+Without a key everything else works unchanged and the PRICE HISTORY tab says what
+is missing. See PLAN.md §10.

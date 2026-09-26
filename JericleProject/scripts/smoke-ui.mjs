@@ -26,17 +26,23 @@ const mkClassList = () => ({
 const KNOWN_IDS = new Set([
   "phaseBadge", "countdown", "clocks", "trending", "refreshBtn",
   "news", "newsNote", "priceNote", "prices", "foot", "tabs",
-  "panel-headlines", "panel-premarket",
+  "panel-headlines", "panel-premarket", "panel-history",
+  "timeframes", "histList", "histNote", "ohlcRead", "tfCredits", "hsChart", "hsSub",
   "scrim", "detail", "dTitle", "dBody", "dClose", "kpiStacks",
 ]);
 
 // The page renders markup as strings and then queries it back to attach
 // listeners. The stub answers `[data-*]` selectors by scanning the host's own
 // innerHTML and hands back elements that remember their handlers, which is
-// enough to click a tab for real rather than just assert on the markup.
-// Elements are cached per host and invalidated when the markup changes, because
-// a real querySelectorAll re-walks the DOM: the same query before and after a
-// re-render must not hand back the same node with stale listeners attached.
+// enough to click a button for real rather than just assert on the markup.
+//
+// Elements are cached per (host, occurrence) and invalidated when the host's
+// markup changes, because a real querySelectorAll re-walks the DOM: the same
+// query after a re-render must not hand back the same node with stale listeners
+// attached. The key is the occurrence index rather than the attribute value,
+// because duplicate values are separate DOM nodes in a real document — keying by
+// value would collapse them onto one stub and let a re-render keep handlers the
+// browser would have discarded.
 const attrState = new WeakMap();
 const attrStubs = (host, sel) => {
   const m = /^\[data-([A-Za-z-]+)\]$/.exec(sel);
@@ -47,8 +53,9 @@ const attrStubs = (host, sel) => {
     attrState.set(host, (st = { html: host.innerHTML, els: new Map() }));
   }
   const out = [];
+  let n = 0;
   for (const hit of host.innerHTML.matchAll(new RegExp(`data-${attr}="([^"]+)"`, "g"))) {
-    const key = `${attr}|${hit[1]}`;
+    const key = `${attr}|${n++}`;
     if (!st.els.has(key)) {
       st.els.set(key, {
         dataset: { [attr]: hit[1] },
@@ -74,6 +81,10 @@ const node = (id) => {
       addEventListener(t, f) { (self._h[t] ||= []).push(f); },
       fire(t) { (self._h[t] || []).forEach((f) => f({})); },
       querySelectorAll(sel) { return attrStubs(self, sel); },
+      // The stub does not parse markup into a tree, so a selector for a real tag
+      // finds nothing and returns null. The page guards on that, and the test
+      // asserts against the rendered string instead.
+      querySelector(sel) { return /^\[data-[a-z-]+\]$/.test(sel) ? attrStubs(self, sel)[0] ?? null : null; },
     };
     nodes.set(id, self);
   }
@@ -141,7 +152,9 @@ let api;
 try {
   api = new Function(script + `
 ;return {load, openDetail, closeDetail, sparkline, fmtPct, fmtAge, sentClass,
-         selectTab, renderTabs, tabFromHash, TABS, get activeTab() { return activeTab; }};`)();
+         selectTab, renderTabs, tabFromHash, TABS, get activeTab() { return activeTab; },
+         loadSeriesMeta, openHistory, setTimeframe, loadSeries, drawSeries,
+         get tfInterval() { return tfInterval; }};`)();
 } catch (e) {
   console.error("script threw during evaluation:\n" + e.stack);
   process.exit(1);
@@ -220,15 +233,17 @@ const checks = [
   ["painted walls no NaN", !/NaN|undefined/.test(painted)],
 
   // ---- panel tabs ----
-  ["a tab per panel", api.TABS.length === 2
-    && ["headlines", "premarket"].every((id) => tabs.includes(`data-tab="${id}"`))],
+  ["a tab per panel", api.TABS.length === 3
+    && ["headlines", "premarket", "history"].every((id) => tabs.includes(`data-tab="${id}"`))],
   ["tab bar is a tablist", node("tabs").innerHTML.includes('role="tab"')
     && html.includes('role="tablist"')],
   ["each tab names the panel it controls",
-    (tabs.match(/aria-controls="panel-[a-z]+"/g) || []).length === 2],
+    (tabs.match(/aria-controls="panel-[a-z]+"/g) || []).length === api.TABS.length
+      && api.TABS.every((t) => tabs.includes(`aria-controls="panel-${t.id}"`))],
   ["opens on top headlines", api.activeTab === "headlines"],
+  // One true and the rest false, rather than a hardcoded count of two.
   ["exactly one tab is selected", (tabs.match(/aria-selected="true"/g) || []).length === 1
-    && (tabs.match(/aria-selected="false"/g) || []).length === 1],
+    && (tabs.match(/aria-selected="false"/g) || []).length === api.TABS.length - 1],
   ["the selected tab carries the on class",
     /class="tab on"[^>]*data-tab="headlines"/.test(tabsFlat)],
   ["only the active panel is visible",
@@ -265,6 +280,10 @@ const checks = [
     globalThis.fireDocument("keydown", { key: "2" });
     return api.activeTab === "premarket";
   })()],
+  ["digit 3 jumps to the price history tab", (() => {
+    globalThis.fireDocument("keydown", { key: "3" });
+    return api.activeTab === "history";
+  })()],
   ["digit 1 jumps back to top headlines", (() => {
     globalThis.fireDocument("keydown", { key: "1" });
     return api.activeTab === "headlines";
@@ -294,6 +313,154 @@ const checks = [
     html.includes(".group:first-child .group-title")],
 ];
 
+// The two blocks below run before `bad` is declared, so they tally into this
+// counter and `bad` picks it up when it is defined below.
+let failEarly = 0;
+
+// ---------------------------------------------------------------------------
+// Price history tab. The stub serves a canned Twelve Data series; the point of
+// this block is that the chart builds from real OHLC without a live API call.
+{
+  // The stub echoes back whatever interval was requested, so a test that switches
+  // timeframe sees the axis and label logic respond to it.
+  const seriesFor = (interval) => ({
+    ok: true,
+    series: {
+      symbol: "NVDA", interval, currency: "USD", exchange: "NASDAQ",
+      bars: [0, 1, 2, 3, 4, 5].map((i) => ({
+        // 1day and up are date-only upstream; a day apart rather than 5 minutes.
+        t: 1790305200 + i * (["1day", "1week", "1month"].includes(interval) ? 86400 : 300),
+        o: 225.0 + i * 0.2, h: 227.5 + i * 0.1, l: 223.0 + i * 0.1,
+        c: 226.25 + i * 0.15, v: 1_200_000 + i * 1000,
+      })),
+      skipped: 0, cached: false, fetchedTs: 1790307000,
+    },
+  });
+  globalThis.fetch = async (path) => {
+    if (path === "/api/dashboard" || path === "/api/refresh") return { json: async () => payload };
+    if (path === "/api/series-meta") {
+      return { json: async () => ({
+        ok: true, enabled: true, provider: "twelvedata",
+        // Every real interval, so the picker is checked against the same set the
+        // server offers rather than a hand-copied subset.
+        intervals: [
+          "1min", "5min", "15min", "30min", "45min",
+          "1h", "2h", "4h", "8h", "1day", "1week", "1month",
+        ].map((i) => ({
+          interval: i, defaultOutputsize: 200,
+          intraday: !["1day", "1week", "1month"].includes(i),
+        })),
+        rateLimitPerMinute: 8, creditsAvailable: 6, reason: null,
+      }) };
+    }
+    if (String(path).startsWith("/api/series/")) {
+      const iv = /interval=([^&]+)/.exec(String(path))?.[1] || "5min";
+      return { json: async () => seriesFor(iv) };
+    }
+    if (String(path).startsWith("/api/options/")) return { json: async () => optionsPayload };
+    return { json: async () => ({}) };
+  };
+
+  await api.loadSeriesMeta();
+  const tf = node("timeframes").innerHTML;
+  const list = node("histList").innerHTML;
+
+  // Start on an intraday interval, so the later switch to 1day is a real change
+  // rather than a no-op against the default.
+  api.setTimeframe("5min");
+  api.openHistory("NVDA");
+  await new Promise((r) => realSetTimeout(r, 80));
+  const chart = node("dBody").innerHTML;
+  const chartSvg = node("hsChart").innerHTML;
+  const read = node("ohlcRead").innerHTML;
+
+  // Daily bars, to exercise the second timestamp shape and the date axis.
+  api.setTimeframe("1day");
+  await new Promise((r) => realSetTimeout(r, 80));
+  const daily = node("dBody").innerHTML;
+  const dailySvg = node("hsChart").innerHTML;
+
+  const hchecks = [
+    ["history: timeframe picker rendered", tf.includes("data-tf=")],
+    ["history: all three horizon groups shown",
+      ["Intraday", "Hourly", "Daily"].every(g => tf.includes(g))],
+    ["history: 1min through 1month all offered",
+      ["1min", "5min", "15min", "30min", "45min", "1h", "2h", "4h", "8h",
+       "1day", "1week", "1month"].every(i => tf.includes(`data-tf="${i}"`))],
+    ["history: remaining credits are surfaced", /credits left this minute/.test(tf)],
+    ["history: list reuses the watchlist groups",
+      ["AI Core", "Memory", "Power"].every(g => list.includes(g))],
+    ["history: list has a row per watchlist symbol",
+      (list.match(/data-hsym=/g) || []).length === payload.watchlist.length],
+    ["history: list spends no credits (no per-row series fetch)",
+      !/api\/series/.test(list)],
+    ["history: drawer opens on the symbol", chart.includes("NVDA")],
+    ["history: candle/line toggle present",
+      chart.includes('data-style="candle"') && chart.includes('data-style="line"')],
+    ["history: a chart was drawn", chartSvg.includes("data-series-chart")],
+    ["history: candles render a rect per bar",
+      (chartSvg.match(/<rect /g) || []).length >= 6],
+    ["history: OHLC readout populated",
+      /\bO\b/.test(read) && /\bH\b/.test(read) && /\bVOL\b/.test(read)],
+    ["history: no NaN in the chart", !/NaN|undefined/.test(chartSvg)],
+    ["history: switching timeframe refetches", dailySvg.includes("data-series-chart")],
+    ["history: the daily chart differs from the intraday one",
+      dailySvg !== chartSvg && api.tfInterval === "1day"],
+    ["history: selecting the active timeframe does not refetch", (() => {
+      // A no-op switch must not spend a credit on the free tier.
+      const before = node("hsChart").innerHTML;
+      api.setTimeframe("1day");
+      return node("hsChart").innerHTML === before;
+    })()],
+    ["history: a daily axis shows dates, not clock times",
+      /\b(Sep|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Oct|Nov|Dec)\b/.test(dailySvg)],
+    ["history: no NaN after the switch", !/NaN|undefined/.test(dailySvg)],
+    ["history: a bad interval is not offered", !tf.includes('data-tf="1sec"')],
+  ];
+  for (const [name, ok] of hchecks) { if (!ok) failEarly++; console.log(`${ok ? "PASS" : "FAIL"}  ${name}`); }
+
+  // The whole point of the secrets design: nothing key-shaped reaches the page.
+  const allMarkup = tabs + tf + list + chart + daily + news + prices + kpi1 + node("foot").innerHTML;
+  const secChecks = [
+    ["no api_key in any rendered markup", !/api_key/i.test(allMarkup)],
+    ["no apikey query string in any markup", !/apikey=/i.test(allMarkup)],
+    ["the series endpoint is same-origin only", html.includes("/api/series/${encodeURIComponent(sym)}")],
+    ["the page never names the upstream host", !/api\.twelvedata\.com/.test(html)],
+  ];
+  for (const [name, ok] of secChecks) { if (!ok) failEarly++; console.log(`${ok ? "PASS" : "FAIL"}  ${name}`); }
+}
+
+// ---------------------------------------------------------------------------
+// Fourth scenario: no API key configured. The tab must explain itself rather than
+// render an empty chart or throw — this is the state a fresh clone is in.
+{
+  globalThis.fetch = async (path) => {
+    if (path === "/api/dashboard" || path === "/api/refresh") return { json: async () => payload };
+    if (path === "/api/series-meta") {
+      return { json: async () => ({
+        ok: true, enabled: false, provider: "twelvedata", intervals: [],
+        rateLimitPerMinute: 8, creditsAvailable: 0,
+        reason: "no [providers.twelvedata] api_key in the secrets file",
+      }) };
+    }
+    return { json: async () => ({}) };
+  };
+  await api.loadSeriesMeta();
+  const nokeyTf = node("timeframes").innerHTML;
+  const nokeyList = node("histList").innerHTML;
+  const nokey = [
+    ["no-key: the picker explains why", nokeyTf.includes("unavailable")
+      && nokeyTf.includes("api_key")],
+    ["no-key: the list points at the secrets file",
+      nokeyList.includes("secrets.toml")],
+    ["no-key: no timeframe buttons are offered", !nokeyList.includes("data-tf=")],
+    ["no-key: no rows are offered", !nokeyList.includes("data-hsym=")],
+    ["no-key: no error surfaced in the footer",
+      !node("foot").innerHTML.includes("could not reach")],
+  ];
+  for (const [name, ok] of nokey) { if (!ok) failEarly++; console.log(`${ok ? "PASS" : "FAIL"}  ${name}`); }
+}
+
 // Detail drawer
 api.openDetail(payload.watchlist[0].symbol);
 const body = node("dBody").innerHTML;
@@ -305,7 +472,7 @@ checks.push(["detail lists or explains news", body.includes("Headlines for")]);
 api.closeDetail();
 checks.push(["drawer closes", !node("detail").classList.contains("on")]);
 
-let bad = 0;
+let bad = failEarly;
 for (const [name, ok] of checks) {
   if (!ok) bad++;
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}`);

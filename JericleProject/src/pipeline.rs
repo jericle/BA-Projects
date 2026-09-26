@@ -29,10 +29,38 @@ pub struct AppState {
     pub options: Arc<crate::sources::yahoo_options::YahooOptions>,
     /// Cached option walls. Open interest is end-of-day data, so a long TTL is fine.
     pub options_cache: RwLock<HashMap<String, (i64, Arc<crate::options::OptionSummary>)>>,
+    /// API credentials, loaded from outside the repo. Never serialised into a
+    /// response; see `secrets.rs`.
+    pub secrets: Arc<crate::secrets::Secrets>,
+    /// Cached OHLC series, keyed by `SYMBOL:interval`.
+    pub series_cache: RwLock<HashMap<String, (i64, Arc<crate::sources::twelvedata::Series>)>>,
+    /// Credit bucket sized to the Twelve Data plan. Refuses rather than overrunning.
+    pub series_rate: crate::sources::ratelimit::RateLimit,
+    /// True when the price-history tab has both a key and the feature enabled.
+    /// The UI reads this to explain itself instead of showing an empty chart.
+    pub series_enabled: bool,
 }
 
 impl AppState {
-    pub fn new(config: Config) -> Result<Arc<Self>> {
+    /// Build state with credentials already resolved, so the caller decides where
+    /// they came from and can report on it once, at startup.
+    pub fn with_secrets(
+        config: Config,
+        secrets: crate::secrets::Secrets,
+        secrets_path: Option<std::path::PathBuf>,
+    ) -> Result<Arc<Self>> {
+        let provider = crate::sources::twelvedata::PROVIDER;
+        let series_enabled = config.twelvedata.enabled && secrets.has(provider);
+        if config.twelvedata.enabled && !secrets.has(provider) {
+            eprintln!(
+                "opendash  price history disabled: no [providers.{provider}] api_key in {}",
+                secrets_path
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| format!("{} (not found)", crate::secrets::default_path().display()))
+            );
+        }
+        // Read before `config` is moved into the struct below.
+        let rate_per_minute = config.twelvedata.rate_limit_per_minute;
         let client = crate::http::client(20)?;
         let store = Arc::new(Store::open(&config.db_path())?);
 
@@ -70,7 +98,87 @@ impl AppState {
             refreshing: AtomicBool::new(false),
             options: Arc::new(crate::sources::yahoo_options::YahooOptions::new()?),
             options_cache: RwLock::new(HashMap::new()),
+            secrets: Arc::new(secrets),
+            series_cache: RwLock::new(HashMap::new()),
+            series_rate: crate::sources::ratelimit::RateLimit::per_minute(rate_per_minute),
+            series_enabled,
         }))
+    }
+
+    /// OHLC series for one symbol at one interval, cached and rate limited.
+    ///
+    /// Deliberately *not* part of the 30s refresh: the free tier allows 8 credits
+    /// per minute and one credit per symbol, so a 22-symbol watchlist cannot ride
+    /// the poll. This is called on click, one symbol at a time, and a cache hit
+    /// spends nothing. The refusal is returned as an error carrying the wait, so
+    /// the UI can say "retry in Ns" rather than showing an empty chart.
+    pub async fn series(
+        &self,
+        symbol: &str,
+        interval: &str,
+        outputsize: usize,
+    ) -> Result<Arc<crate::sources::twelvedata::Series>> {
+        use crate::sources::twelvedata as td;
+
+        if !self.config.twelvedata.enabled {
+            anyhow::bail!("price history is disabled in config.toml ([twelvedata] enabled = false)");
+        }
+        let Some(key) = self.secrets.api_key(td::PROVIDER) else {
+            anyhow::bail!(
+                "no [providers.{}] api_key configured, so price history is unavailable",
+                td::PROVIDER
+            );
+        };
+        if !td::is_valid_interval(interval) {
+            anyhow::bail!("unsupported interval {interval:?}");
+        }
+        let outputsize = outputsize.clamp(1, 5000);
+        let symbol = symbol.trim().to_ascii_uppercase();
+        let cache_key = format!("{symbol}:{interval}");
+
+        let now = chrono::Utc::now().timestamp();
+        {
+            let cache = self.series_cache.read().await;
+            if let Some((at, s)) = cache.get(&cache_key) {
+                if now - at < self.config.twelvedata.cache_seconds {
+                    let mut hit = (**s).clone();
+                    hit.cached = true;
+                    return Ok(Arc::new(hit));
+                }
+            }
+        }
+
+        // Spend the credit only on a genuine miss, and refuse before spending.
+        if let Err(wait) = self.series_rate.acquire() {
+            anyhow::bail!(
+                "Twelve Data rate limit: {} credit(s)/min is the plan allowance and all \
+                 are spent. Retry in {}s.",
+                self.config.twelvedata.rate_limit_per_minute,
+                wait.as_secs().max(1)
+            );
+        }
+
+        let fetched = td::fetch_series(
+            &self.client,
+            &self.config.twelvedata.base_url,
+            key,
+            &symbol,
+            interval,
+            outputsize,
+        )
+        .await?;
+
+        let series = Arc::new(fetched);
+        {
+            let mut cache = self.series_cache.write().await;
+            // Bound the cache: one entry per symbol × interval, and the interval
+            // set is user-driven, so an unbounded map would grow without limit.
+            if cache.len() > 256 {
+                cache.clear();
+            }
+            cache.insert(cache_key, (now, Arc::clone(&series)));
+        }
+        Ok(series)
     }
 
     /// Option walls for one symbol, cached. Yahoo first, CBOE as a fallback so a

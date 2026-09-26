@@ -20,6 +20,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/refresh", get(api_refresh))
         .route("/api/options/{symbol}", get(api_options))
         .route("/api/history/{symbol}", get(api_history))
+        .route("/api/series/{symbol}", get(api_series))
+        .route("/api/series-meta", get(api_series_meta))
         .route("/health", get(health))
         .with_state(state)
 }
@@ -62,6 +64,109 @@ async fn api_options(
         }
         Err(e) => Json(json!({ "ok": false, "symbol": symbol, "error": e.to_string() })),
     }
+}
+
+/// Validates a symbol the same way `api_options` does, so a path segment cannot
+/// smuggle a query string or a slash into an upstream request.
+fn clean_symbol(raw: &str) -> std::result::Result<String, axum::http::StatusCode> {
+    let s = raw.trim().to_ascii_uppercase();
+    if s.is_empty()
+        || s.len() > 12
+        || !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
+        return Err(axum::http::StatusCode::BAD_REQUEST);
+    }
+    Ok(s)
+}
+
+/// OHLC series for one symbol at one interval, from Twelve Data.
+///
+/// The browser never learns the upstream URL or the key: it asks this endpoint,
+/// which spends a credit server-side and returns only bars. The response is
+/// `no-store` so a proxied chart cannot be cached by the browser or a shared proxy.
+async fn api_series(
+    State(state): State<Arc<AppState>>,
+    Path(symbol): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<SeriesQuery>,
+) -> Result<impl IntoResponse, (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
+    let symbol = clean_symbol(&symbol).map_err(|st| {
+        (st, axum::Json(json!({ "ok": false, "error": "bad symbol" })))
+    })?;
+
+    let interval = q
+        .interval
+        .as_deref()
+        .unwrap_or("1day")
+        .trim()
+        .to_ascii_lowercase();
+    if !crate::sources::twelvedata::is_valid_interval(&interval) {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(json!({
+                "ok": false,
+                "error": format!("unsupported interval {interval:?}"),
+                "supported": crate::sources::twelvedata::INTERVALS
+                    .iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            })),
+        ));
+    }
+    let outputsize = q
+        .outputsize
+        .unwrap_or_else(|| crate::sources::twelvedata::default_outputsize(&interval) as u32)
+        .min(5000) as usize;
+
+    match state.series(&symbol, &interval, outputsize).await {
+        Ok(series) => Ok((
+            [(header::CACHE_CONTROL, "no-store, max-age=0")],
+            axum::Json(json!({ "ok": true, "series": &*series })),
+        )),
+        // A rate refusal is the client's problem to retry, not a server fault, so
+        // it gets 429 with the wait spelled out rather than a 500.
+        Err(e) if e.to_string().contains("rate limit") => Err((
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(json!({ "ok": false, "error": e.to_string() })),
+        )),
+        Err(e) => Ok((
+            [(header::CACHE_CONTROL, "no-store, max-age=0")],
+            axum::Json(json!({ "ok": false, "symbol": symbol, "error": e.to_string() })),
+        )),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct SeriesQuery {
+    interval: Option<String>,
+    outputsize: Option<u32>,
+}
+
+/// What the UI needs to render the timeframe picker, plus whether the feature is
+/// usable at all. Carries no key and no account detail — only whether one exists.
+async fn api_series_meta(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(json!({
+        "ok": true,
+        "enabled": state.series_enabled,
+        "provider": crate::sources::twelvedata::PROVIDER,
+        "intervals": crate::sources::twelvedata::INTERVALS
+            .iter()
+            .map(|(i, n)| json!({
+                "interval": i,
+                "defaultOutputsize": n,
+                // The UI needs this to pick a time-of-day or date axis label.
+                "intraday": crate::sources::twelvedata::is_intraday(i),
+            }))
+            .collect::<Vec<_>>(),
+        "rateLimitPerMinute": state.config.twelvedata.rate_limit_per_minute,
+        "creditsAvailable": state.series_rate.available(),
+        "reason": if !state.series_enabled {
+            if !state.config.twelvedata.enabled {
+                Some("disabled in config.toml ([twelvedata] enabled = false)")
+            } else {
+                Some("no [providers.twelvedata] api_key in the secrets file")
+            }
+        } else {
+            None
+        },
+    }))
 }
 
 async fn api_dashboard(State(state): State<Arc<AppState>>) -> impl IntoResponse {

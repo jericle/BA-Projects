@@ -306,6 +306,59 @@
   footer { color: var(--dim); font-size: 11px; padding: 0 20px 26px; }
   .warn { color: var(--warn); }
   .empty { padding: 24px 13px; color: var(--dim); }
+
+  /* ---------- price history ---------- */
+  /* The timeframe picker sits in the panel header and drives the detail chart.
+     Grouped by horizon so the 12 intervals read as four tiers rather than a
+     single long strip of buttons. */
+  .tf {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 9px 13px; border-bottom: 1px solid var(--line);
+    background: #1b2027;
+  }
+  .tf-group { display: flex; align-items: center; gap: 5px; }
+  .tf-label {
+    font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--dim); margin-right: 2px;
+  }
+  .tf button {
+    background: var(--panel); color: var(--muted);
+    border: 1px solid var(--line); border-radius: 3px;
+    padding: 3px 8px; font: inherit; font-size: 11px; cursor: pointer;
+    font-variant-numeric: tabular-nums;
+  }
+  .tf button:hover { color: var(--text); border-color: #3d444d; }
+  .tf button.on {
+    background: #1d3b46; color: var(--accent); border-color: #2a5563; font-weight: 600;
+  }
+  .tf .spacer { flex: 1; }
+  .tf-note { font-size: 10.5px; color: var(--dim); }
+
+  /* Candle/line toggle, shown in the chart toolbar. */
+  .stylebtn {
+    display: flex; border: 1px solid var(--line); border-radius: 3px; overflow: hidden;
+  }
+  .stylebtn button {
+    background: var(--panel); color: var(--muted); border: none;
+    padding: 4px 10px; font: inherit; font-size: 11px; cursor: pointer;
+  }
+  .stylebtn button + button { border-left: 1px solid var(--line); }
+  .stylebtn button.on { background: #1d3b46; color: var(--accent); font-weight: 600; }
+
+  .chartbar {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 0 0 9px;
+  }
+  .chartbar .title { font-size: 13px; font-weight: 600; }
+  .chartbar .sub { color: var(--dim); font-size: 11px; }
+  .chartbar .spacer { flex: 1; }
+  #ohlcRead { display: flex; gap: 13px; font-size: 11px; color: var(--muted); }
+  #ohlcRead b { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 600; }
+  #ohlcRead span { color: var(--dim); font-size: 10px; display: block; letter-spacing: .06em; }
+  .chartmsg { padding: 26px 13px; color: var(--dim); text-align: center; }
+  .chartmsg .big { color: var(--muted); font-size: 12.5px; margin-bottom: 6px; }
+  .candle { fill: var(--up); }
+  .candle.dn { fill: var(--down); }
 </style>
 </head>
 <body>
@@ -335,6 +388,12 @@
   <section class="panel" id="panel-premarket" role="tabpanel" aria-label="Pre-Market">
     <h2><span>Pre-market</span><span class="note" id="priceNote"></span></h2>
     <div id="prices"></div>
+  </section>
+
+  <section class="panel" id="panel-history" role="tabpanel" aria-label="Price History">
+    <h2><span>Price history</span><span class="note" id="histNote"></span></h2>
+    <div class="tf" id="timeframes"></div>
+    <div id="histList"></div>
   </section>
 </main>
 
@@ -384,6 +443,7 @@ let busy = false;
 const TABS = [
   { id: "headlines", label: "Top Headlines", key: "1", note: "ranked market-moving stories" },
   { id: "premarket", label: "Pre-Market", key: "2", note: "watchlist price action" },
+  { id: "history", label: "Price History", key: "3", note: "OHLC bars at any timeframe, Twelve Data" },
 ];
 const panelId = (id) => `panel-${id}`;
 let activeTab = TABS[0].id;
@@ -775,6 +835,315 @@ function renderPrices() {
     el.addEventListener("click", () => openDetail(el.dataset.sym)));
 }
 
+// ---------------------------------------------------------------- price history
+// The list reuses the Yahoo quote already in the dashboard payload and costs no
+// credits. Twelve Data is only called when a symbol is opened, one credit each,
+// which is what makes the free 8/min tier workable: 22 symbols could never ride
+// the 30s poll, but a handful of deliberate clicks can.
+const TFS = [
+  { label: "Intraday", items: ["1min", "5min", "15min", "30min", "45min"] },
+  { label: "Hourly", items: ["1h", "2h", "4h", "8h"] },
+  { label: "Daily", items: ["1day", "1week", "1month"] },
+];
+
+let tfMeta = null;      // /api/series-meta, fetched once
+let tfInterval = "1day";
+let tfStyle = "candle"; // "candle" | "line"
+let histSelected = null;
+let histSeries = null;
+let histToken = 0;
+
+const intraday = (iv) => (tfMeta?.intervals || []).find(i => i.interval === iv)?.intraday ?? true;
+
+function renderTimeframes() {
+  const host = $("timeframes");
+  if (!tfMeta) { host.innerHTML = `<span class="tf-note">loading…</span>`; return; }
+
+  if (!tfMeta.enabled) {
+    host.innerHTML = `<span class="tf-note warn">price history unavailable — ${esc(tfMeta.reason || "not configured")}</span>`;
+    return;
+  }
+  const btn = (iv) =>
+    `<button data-tf="${iv}" class="${iv === tfInterval ? "on" : ""}"
+       title="${esc(iv)} bars">${esc(iv)}</button>`;
+  host.innerHTML =
+    TFS.map(g => `<div class="tf-group"><span class="tf-label">${esc(g.label)}</span>${
+      g.items.filter(iv => (tfMeta.intervals || []).some(i => i.interval === iv)).map(btn).join("")
+    }</div>`).join("") +
+    `<div class="spacer"></div>` +
+    `<span class="tf-note" id="tfCredits" title="Twelve Data credits left this minute"></span>`;
+
+  host.querySelectorAll("[data-tf]").forEach(el =>
+    el.addEventListener("click", () => setTimeframe(el.dataset.tf)));
+  renderCredits();
+}
+
+function renderCredits() {
+  const el = $("tfCredits");
+  if (!el || !tfMeta) return;
+  const left = tfMeta.creditsAvailable;
+  const cap = tfMeta.rateLimitPerMinute;
+  el.innerHTML = left === 0
+    ? `<span class="warn">no credits left this minute — retry shortly</span>`
+    : `${left}/${cap} credits left this minute`;
+}
+
+function setTimeframe(iv) {
+  if (iv === tfInterval) return;
+  tfInterval = iv;
+  renderTimeframes();
+  if (histSelected) loadSeries(histSelected);
+}
+
+async function loadSeriesMeta() {
+  try {
+    const res = await fetch("/api/series-meta", { cache: "no-store" });
+    tfMeta = await res.json();
+  } catch (e) {
+    tfMeta = { enabled: false, reason: String(e) };
+  }
+  renderTimeframes();
+  renderHistoryList();
+}
+
+function renderHistoryList() {
+  const host = $("histList");
+  // `loadSeriesMeta()` runs in parallel with the first `load()`, so this can be
+  // called before any dashboard payload has arrived.
+  const quotes = (DATA && DATA.watchlist) || [];
+  $("histNote").textContent = tfMeta?.enabled
+    ? `${quotes.length} symbols · click one for ${tfInterval} bars`
+    : "unavailable";
+
+  if (!tfMeta?.enabled) {
+    host.innerHTML = `<div class="empty">Price history needs a Twelve Data API key.
+      Add one to <code>~/.opendash/secrets.toml</code> and restart — see README.</div>`;
+    return;
+  }
+  if (!quotes.length) { host.innerHTML = `<div class="empty">No quotes yet.</div>`; return; }
+
+  const byGroup = new Map();
+  for (const q of quotes) {
+    if (!byGroup.has(q.group)) byGroup.set(q.group, []);
+    byGroup.get(q.group).push(q);
+  }
+  // Each row here links to the Twelve Data series endpoint rather than embedding
+  // one, which is what keeps the list at zero credits: 22 symbols could never be
+  // refetched on the 30s poll against an 8/min allowance.
+  let html = "";
+  for (const [group, rows] of byGroup) {
+    html += `<div class="group"><div class="group-title">${esc(group)}</div>`;
+    for (const q of rows) {
+      const chg = q.gapPct != null ? q.gapPct : q.changePct;
+      const sel = histSelected === q.symbol ? " sel" : "";
+      html += `<div class="row${sel}" data-hsym="${esc(q.symbol)}"
+        title="${esc(q.name)} — ${esc(tfInterval)} bars from Twelve Data">
+        <div class="sym">${esc(q.symbol)}</div>
+        <div class="px">${q.last > 0 ? money(q.last) : "—"}<small>prev ${q.priorClose > 0 ? money(q.priorClose) : "—"}</small></div>
+        <div class="chg ${cls(chg)}">${chg == null ? "—" : fmtPct(chg)}</div>
+        <div class="nnews">${esc(q.group)}</div>
+      </div>`;
+    }
+    html += `</div>`;
+  }
+  host.innerHTML = html;
+  host.querySelectorAll("[data-hsym]").forEach(el =>
+    el.addEventListener("click", () => openHistory(el.dataset.hsym)));
+}
+
+function openHistory(sym) {
+  const q = (DATA.watchlist || []).find(x => x.symbol === sym);
+  if (!q) return;
+  histSelected = sym;
+  renderHistoryList();
+
+  $("dTitle").textContent = `${q.symbol}  ·  ${q.name}`;
+  // Reset the crosshair: it indexes into the previous symbol's bars, and leaving it
+  // set would make the readout describe a bar index this chart may not have.
+  hoverIndex = null;
+  $("dBody").innerHTML = `
+    <div class="chartbar">
+      <span class="title">${esc(q.symbol)}</span>
+      <span class="sub" id="hsSub">loading ${esc(tfInterval)} bars…</span>
+      <div class="spacer"></div>
+      <div class="stylebtn">
+        <button data-style="candle" class="${tfStyle === "candle" ? "on" : ""}">candles</button>
+        <button data-style="line" class="${tfStyle === "line" ? "on" : ""}">line</button>
+      </div>
+    </div>
+    <div id="ohlcRead"></div>
+    <div id="hsChart"><div class="chartmsg">fetching from Twelve Data…</div></div>`;
+
+  $("dBody").querySelectorAll("[data-style]").forEach(el =>
+    el.addEventListener("click", () => {
+      tfStyle = el.dataset.style;
+      $("dBody").querySelectorAll("[data-style]").forEach(b =>
+        b.classList.toggle("on", b.dataset.style === tfStyle));
+      drawSeries();
+    }));
+
+  $("detail").classList.add("on");
+  $("scrim").classList.add("on");
+  loadSeries(sym);
+}
+
+/// Fetch one symbol. The token guards against a slow response landing after the
+/// user has already switched symbol or timeframe and painting the wrong chart.
+async function loadSeries(sym) {
+  const token = ++histToken;
+  const host = $("hsChart");
+  if (host) host.innerHTML = `<div class="chartmsg">fetching ${esc(sym)} ${esc(tfInterval)}…</div>`;
+
+  let d;
+  try {
+    const res = await fetch(`/api/series/${encodeURIComponent(sym)}?interval=${encodeURIComponent(tfInterval)}`,
+      { cache: "no-store" });
+    d = await res.json();
+    if (res.status === 429 && d.creditsAvailable != null) tfMeta.creditsAvailable = d.creditsAvailable;
+  } catch (e) {
+    d = { ok: false, error: String(e) };
+  }
+  if (token !== histToken) return;
+
+  if (!d.ok) {
+    histSeries = null;
+    if (host) {
+      host.innerHTML = `<div class="chartmsg"><div class="big">could not load ${esc(sym)} ${esc(tfInterval)}</div>
+        <div class="warn">${esc(d.error || "unknown error")}</div></div>`;
+    }
+    const sub = $("hsSub");
+    if (sub) sub.textContent = "unavailable";
+    renderCredits();
+    return;
+  }
+
+  histSeries = d.series;
+  const sub = $("hsSub");
+  if (sub) {
+    const bits = [`${histSeries.bars.length} bars`, `as of ${etFullFmt.format(new Date(histSeries.fetchedTs * 1000))} ET`];
+    if (histSeries.skipped) bits.push(`${histSeries.skipped} bar(s) skipped`);
+    if (histSeries.cached) bits.push("cached");
+    if (histSeries.exchange) bits.unshift(histSeries.exchange);
+    sub.textContent = bits.join(" · ");
+  }
+  drawSeries();
+  renderCredits();
+}
+
+const etDayFmt = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York", month: "short", day: "numeric" });
+const etMonthFmt = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York", year: "numeric", month: "short" });
+
+/// The readout above the chart. Shows the hovered bar when there is one, and the
+/// last bar otherwise, so the OHLC figures always describe something on screen.
+function drawSeries() {
+  const host = $("hsChart");
+  if (!host || !histSeries || !histSeries.bars.length) return;
+  const bars = histSeries.bars;
+  const int = intraday(histSeries.interval);
+  const shown = hoverIndex == null ? bars.length - 1 : Math.min(hoverIndex, bars.length - 1);
+  const b = bars[shown];
+  const prev = shown > 0 ? bars[shown - 1].c : null;
+  const chg = prev != null ? ((b.c - prev) / prev) * 100 : null;
+
+  $("ohlcRead").innerHTML = [
+    ["O", money(b.o)], ["H", money(b.h)], ["L", money(b.l)], ["C", money(b.c)],
+    ["VOL", compact(b.v)],
+    chg == null ? null : ["CHG", fmtPct(chg)],
+    ["TIME", int ? etFmt.format(new Date(b.t * 1000)) : etDayFmt.format(new Date(b.t * 1000))],
+  ].filter(Boolean).map(([k, v]) => `<div><span>${k}</span><b class="${
+    k === "CHG" ? cls(chg) : ""}">${v}</b></div>`).join("");
+
+  const W = 700, H = 300, L = 8, R = 58, T = 10, B = 24;
+  let lo = Math.min(...bars.map(x => x.l));
+  let hi = Math.max(...bars.map(x => x.h));
+  // Always include the open so a flat bar is not drawn on the axis edge.
+  lo = Math.min(lo, ...bars.map(x => x.o));
+  hi = Math.max(hi, ...bars.map(x => x.o));
+  const padY = (hi - lo) * 0.08 || Math.max(hi * 0.004, 0.02);
+  lo -= padY; hi += padY;
+  const t0 = bars[0].t, t1 = bars[bars.length - 1].t;
+  const span = Math.max(1, t1 - t0);
+  const X = (i) => L + (bars.length === 1 ? (W - L - R) / 2 : (i / (bars.length - 1)) * (W - L - R));
+  const Y = (p) => T + (1 - (p - lo) / (hi - lo)) * (H - T - B);
+
+  const gridY = [0, 0.25, 0.5, 0.75, 1].map(f => {
+    const p = lo + (hi - lo) * f, y = Y(p);
+    return `<line x1="${L}" y1="${y.toFixed(1)}" x2="${W - R}" y2="${y.toFixed(1)}"
+              stroke="var(--line)" stroke-width="1" opacity=".7"/>
+            <text x="${W - R + 5}" y="${(y + 3).toFixed(1)}" fill="var(--dim)"
+              font-size="10">${money(p)}</text>`;
+  }).join("");
+
+  const fmtTick = (t) => {
+    const d = new Date(t * 1000);
+    if (histSeries.interval === "1month") return etMonthFmt.format(d);
+    if (int) return etFmt.format(d);
+    return etDayFmt.format(d);
+  };
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map(f => {
+    const t = t0 + span * f, x = X(Math.round(f * (bars.length - 1)));
+    return `<text x="${x.toFixed(1)}" y="${H - 7}" fill="var(--dim)" font-size="10"
+              text-anchor="${f === 0 ? "start" : f === 1 ? "end" : "middle"}">${esc(fmtTick(t))}</text>`;
+  }).join("");
+
+  // Candle width tracks the bar count: 500 daily bars and 20 weekly bars both
+  // have to fit, and a fixed width either overlaps or leaves a gap.
+  const slot = (W - L - R) / Math.max(1, bars.length);
+  const bw = Math.max(1, Math.min(9, slot * 0.62));
+  let plot;
+  if (tfStyle === "candle") {
+    plot = bars.map((x, i) => {
+      const up = x.c >= x.o;
+      const col = up ? "var(--up)" : "var(--down)";
+      const yO = Y(x.o), yC = Y(x.c);
+      const top = Math.min(yO, yC);
+      const hgt = Math.max(1, Math.abs(yC - yO));
+      return `<line x1="${X(i).toFixed(1)}" y1="${Y(x.h).toFixed(1)}"
+                x2="${X(i).toFixed(1)}" y2="${Y(x.l).toFixed(1)}" stroke="${col}" stroke-width="1"/>
+              <rect x="${(X(i) - bw / 2).toFixed(2)}" y="${top.toFixed(2)}"
+                width="${bw.toFixed(2)}" height="${hgt.toFixed(2)}"
+                fill="${col}" opacity=".85"/>`;
+    }).join("");
+  } else {
+    const d = bars.map((x, i) => `${i ? "L" : "M"}${X(i).toFixed(1)},${Y(x.c).toFixed(1)}`).join(" ");
+    const up = bars[bars.length - 1].c >= bars[0].c;
+    plot = `<path d="${d}" fill="none" stroke="${up ? "var(--up)" : "var(--down)"}" stroke-width="1.6"/>`;
+  }
+
+  // Crosshair on the bar being read out.
+  const cx = X(shown);
+  const cross = `<line x1="${cx.toFixed(1)}" y1="${T}" x2="${cx.toFixed(1)}" y2="${H - B}"
+      stroke="var(--accent)" stroke-width="1" stroke-dasharray="3 3" opacity=".65"/>
+    <circle cx="${cx.toFixed(1)}" cy="${Y(b.c).toFixed(1)}" r="3.5"
+      fill="${b.c >= b.o ? "var(--up)" : "var(--down)"}" stroke="var(--panel-2)" stroke-width="1.5"/>`;
+
+  host.innerHTML = `<div class="chartbox">
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block"
+         data-series-chart="1" data-n="${bars.length}">
+      ${gridY}${ticks}${plot}${cross}
+      <rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent"
+        data-hit="1"/>
+    </svg>
+  </div>`;
+
+  const svg = host.querySelector("svg");
+  if (!svg) return;
+  svg.addEventListener("mousemove", (e) => {
+    const r = svg.getBoundingClientRect();
+    const frac = ((e.clientX - r.left) / r.width) * W;
+    const i = Math.round(((frac - L) / (W - L - R)) * (bars.length - 1));
+    const idx = Math.max(0, Math.min(bars.length - 1, i));
+    if (idx !== hoverIndex) { hoverIndex = idx; drawSeries(); }
+  });
+  svg.addEventListener("mouseleave", () => {
+    if (hoverIndex != null) { hoverIndex = null; drawSeries(); }
+  });
+}
+
+let hoverIndex = null;
+
 // ---------------------------------------------------------------- detail
 function openDetail(sym) {
   const q = (DATA.watchlist || []).find(x => x.symbol === sym);
@@ -896,8 +1265,15 @@ function openDetail(sym) {
 function closeDetail() {
   $("detail").classList.remove("on");
   $("scrim").classList.remove("on");
+  // Bump the token so an in-flight Twelve Data response cannot reopen or repaint
+  // a drawer the user has already dismissed.
+  histToken += 1;
   selected = null;
+  histSelected = null;
+  histSeries = null;
+  hoverIndex = null;
   renderPrices();
+  renderHistoryList();
 }
 
 // ---------------------------------------------------------------- chrome
@@ -945,11 +1321,18 @@ async function load(manual) {
     renderNews();
     renderPrices();
     renderKpis();
+    renderHistoryList();
     if (selected) {
       // keep the open drawer in sync with fresh data
       const keep = selected;
       $("detail").classList.remove("on");
       openDetail(keep);
+    } else if (histSelected) {
+      // The price-history drawer is driven by a separate fetch, so a poll must not
+      // reopen it and spend another credit; just refresh the header figures.
+      const keep = histSelected;
+      const q = (DATA.watchlist || []).find(x => x.symbol === keep);
+      if (q) $("dTitle").textContent = `${q.symbol}  ·  ${q.name}`;
     }
   } catch (e) {
     $("foot").innerHTML = `<span class="warn">could not reach the server: ${esc(e)}</span>`;
@@ -987,6 +1370,7 @@ setInterval(() => load(false), 30000);
 
 activeTab = tabFromHash() || TABS[0].id;
 renderTabs();
+loadSeriesMeta();
 load(false);
 </script>
 </body>

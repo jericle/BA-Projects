@@ -25,10 +25,11 @@
   drawing a misleading sparkline.
 * **`deny_unknown_fields` on the config.** Appending a key after a `[table]` header silently
   lands it in that table; a misplaced key is now a hard parse error.
-* **Verification added:** 29 Rust unit tests (calendar, DST, scoring, RSS, option walls,
-  OCC parsing) and `scripts/smoke-ui.mjs`, which runs the page's real JavaScript against
-  the live API payload under a stub DOM and asserts 66 rendering invariants (27 at the
-  time of writing, 66 after the tab milestone).
+* **Verification added:** 61 Rust unit tests (calendar, DST, scoring, RSS, option walls,
+  OCC parsing, secrets redaction and permissions, the credit counter, and every Twelve
+  Data parsing quirk above) and `scripts/smoke-ui.mjs`, which runs the page's real
+  JavaScript against the live API payload under a stub DOM and asserts 95 rendering
+  invariants (27 at the time of writing, 66 after the tab milestone, 95 after this one).
 * **KPI cards added** (second request): row 1 is the session extremes. The first cut used
   "most traded / least traded", which is high volume vs *low* volume and not what a
   High Volume Buy/Sell read is actually for. Corrected to the directional definition:
@@ -49,6 +50,54 @@
   JSON float, which serde will not coerce into `i64`.
 * **OCC strike fields are in thousandths**, confirmed by cross-reference: Yahoo reports
   `NVDA260925C00050000` as strike 50.0, not 500.
+* **PRICE HISTORY tab** (v0.3.0). A third tab, next to the other two, showing OHLC bars
+  for the watchlist at any of Twelve Data's twelve intervals (`1min` … `1month`), with
+  candles or a line and a crosshair readout of O/H/L/C/volume. The list view reuses the
+  Yahoo quote already in the dashboard payload and costs **zero** credits; Twelve Data is
+  called only when a symbol is opened. That split is what makes the free tier viable at
+  all — see the rate-limit note below.
+* **This is the project's first keyed upstream, and the key is kept out of the repo.**
+  `BA-Projects` is a **public** GitHub repository, so an API key in a tracked file is a key
+  anyone can clone. The key lives in `~/.opendash/secrets.toml`, mode 600, outside the repo
+  entirely. Four things back that up: the file mode is checked on load and a loose one is
+  reported with the `chmod` to fix it; the key travels in an `Authorization` header, never
+  a query string, so it cannot surface in an access log, a `Referer`, or an error that
+  echoes the URL; `Debug` is hand-written to print `***` (and not the length, which is
+  small enough to brute-force the rest); and there is deliberately no `Serialize`.
+  `.gitignore` now carries a secrets pattern as a second line of defence, and
+  `launchd/install.sh` creates the file from a committed template at mode 600 rather than
+  letting a umask decide. Verified by sweeping every endpoint for the key: clean.
+* **Providers are a map, not a struct field.** `secrets.toml` is `[providers.<name>]`, so a
+  second service needs no code change — which was the stated requirement, since more keys
+  are coming. A misspelled provider name resolves to `None` and reports itself, rather than
+  quietly matching nothing; a misspelled *field* inside a provider is a parse error, so a
+  typo cannot present as "no key configured".
+* **A rate limiter that caused the throttling it was meant to prevent.** The first version
+  was a continuously-refilling token bucket, which is right for smoothing your own bursts
+  and wrong for matching a provider's quota. Live against the free tier it let **11
+  requests into an 8/min limit** — tokens trickled back mid-window as a slow sequence of
+  clicks ran — and Twelve Data's own error said so. Matching a provider means reproducing
+  the provider's window arithmetic, so it now counts within the wall-clock minute and
+  resets on the minute. Re-tested live: 12 distinct symbols in one minute gave exactly 8
+  served, 4 refused with a retry hint, 0 rejected upstream.
+* **Twelve Data reports a quota breach as HTTP 200 with an error body**, so the response
+  code cannot be the thing that catches it. The body is parsed first and its message
+  surfaced, because "the plan allowance is 8/min, retry in 23s" is actionable and "HTTP 200"
+  is not. The limiter refuses *before* spending.
+* **Four upstream quirks the parser handles, each with a test.** All OHLC values arrive as
+  strings carrying float noise (`"225.080002"`). Bars come back **newest first**, so the
+  request asks for `order=asc` and the parser sorts anyway, because a cached or batched
+  payload can still arrive reversed. `1day`/`1week`/`1month` return a **bare date**
+  (`2026-09-01`) and ignore `timezone` entirely, while intraday returns a full timestamp —
+  two shapes, both naive wall-clock, both localised to ET explicitly. Guessing UTC for the
+  date-only shape is the classic way to put every daily bar on the wrong date. A bar in the
+  spring-forward gap is rejected rather than silently shifted an hour.
+* **`prepost` is Pro+ only**, so this tab cannot serve pre-market bars — the demo key
+  appeared to return extended-hours data, but that is the demo key behaving specially and
+  is not evidence a free key will. Yahoo's pre-market coverage in the PRE-MARKET tab is
+  therefore kept, and the two tabs stay separate rather than merging.
+* **A no-op timeframe switch does not refetch.** Against an 8/min budget, re-selecting the
+  active interval would spend a credit to redraw an identical chart. Covered by a test.
 * **One tab per panel** (this milestone). The two panels used to share a row —
   headlines in a 1.35fr column, pre-market in a 1fr one — so neither ever got
   room for what it had to show. Each is now its own full-width tab, `TOP HEADLINES`
@@ -99,6 +148,7 @@ All of the following were tested live before writing this plan.
 | Yahoo quotes (pre/post) | `query1.finance.yahoo.com/v8/finance/chart/{T}?interval=1m&range=1d&includePrePost=true` | 200, no API key. 1-minute bars from 04:00 ET incl. pre-market. `meta.previousClose` present |
 | Yahoo trending | `query1.finance.yahoo.com/v1/finance/trending/US` | 200, works. Used as a fallback source of "what matters today" |
 | Market-wide news | `news.google.com/rss/search?q=...&hl=en-US&gl=US&ceid=US:en` | 200, 100 items, `pubDate` (RFC 2822) + `<source>` publisher |
+| Twelve Data OHLC | `api.twelvedata.com/time_series?symbol=..&interval=..` | 200, but **needs a key**. Header auth works and is used so the key stays out of the URL. All 12 intervals confirmed live |
 
 **Rejected / avoided**
 
@@ -108,6 +158,11 @@ All of the following were tested live before writing this plan.
   Market-wide news comes from Google News RSS instead.
 - NewsAPI.org free tier → 100 req/day and ~24h article delay, useless for a live pre-open view.
 - Finnhub → good but needs a signup key; deliberately avoided to keep this keyless.
+
+**A note on the keyless property.** The dashboard is still keyless *for news and quotes* —
+Google News RSS, Yahoo chart, Yahoo news and CBOE all remain unauthenticated. Twelve Data is
+the single exception, added for the PRICE HISTORY tab only, and §10 covers what it took to
+keep that key out of a public repository.
 
 **Local LLM** (`http://10.0.0.2:52415`, mlx Qwen) was not responding during planning, so it is
 wired in as an **optional** rerank step with a hard timeout and a silent fallback. Nothing
@@ -131,6 +186,7 @@ JericleProject/
 │   └── preopen_alert.sh                  DST-safe 8:25 ET → macOS banner
 ├── scripts/
 │   └── smoke-ui.mjs             headless run of the page's JS against a live payload
+├── secrets.example.toml         credentials TEMPLATE; the real file is never in the repo
 ├── src/
 │   ├── main.rs                serve | snapshot | alert-once
 │   ├── config.rs              config.toml loading + defaults
@@ -142,6 +198,7 @@ JericleProject/
 │   ├── store.rs               SQLite history (rusqlite)
 │   ├── pipeline.rs            the refresh cycle: quotes + news in, Dashboard out
 │   ├── llm.rs                 optional local-LLM rerank
+│   ├── secrets.rs             API keys from outside the repo; redacted Debug
 │   ├── sources/
 │   │   ├── mod.rs             source module list
 │   │   ├── yahoo_chart.rs     pre-market quotes
@@ -149,7 +206,9 @@ JericleProject/
 │   │   ├── yahoo_options.rs   option chain via Yahoo's cookie + crumb session
 │   │   ├── cboe.rs            fallback option chain from Cboe's OPRA feed
 │   │   ├── gnews.rs           market-wide RSS
-│   │   └── trending.rs        Yahoo trending tickers
+│   │   ├── trending.rs        Yahoo trending tickers
+│   │   ├── twelvedata.rs      OHLC series at any interval (PRICE HISTORY tab)
+│   │   └── ratelimit.rs       per-minute credit counter matched to the plan
 │   └── web/
 │       ├── mod.rs             axum router, JSON API
 │       └── index.html         embedded single-page UI
@@ -224,15 +283,18 @@ accent, `#66bb6a` / `#ef5350` for up/down).
 - **KPI band** — always visible, above the tabs: the four session cards
   (highest-volume buy / sell, top gainer / loser) each directly above the option
   walls for that same symbol
-- **Panel tabs** — one tab per panel, each the full page width. `TOP HEADLINES`
-  and `PRE_MARKET`, switchable by click, by digit `1`–`9`, or by a `#tab` URL
-  fragment so a link reopens the same panel
+- **Panel tabs** — one tab per panel, each the full page width. `TOP HEADLINES`,
+  `PRE_MARKET` and `PRICE HISTORY`, switchable by click, by digit `1`–`9`, or by a
+  `#tab` URL fragment so a link reopens the same panel
 - **Top 20 news** — headline, publisher, age, sentiment chip, tagged tickers, salience
   bar (breakdown on hover)
 - **Pre-market table** — watchlist groups side by side as columns; price, gap %,
   sparkline, news count
 - **Ticker detail** — click a row: full 04:00→09:30 ET price chart with news markers
   plotted at publish time, plus that ticker's news list
+- **Price history** — OHLC bars for any watchlist symbol at any of twelve intervals,
+  candles or line, crosshair readout of O/H/L/C/volume. Sourced from Twelve Data,
+  one credit per opened symbol; the list itself reuses Yahoo data and is free
 
 ## 9. Automation
 
@@ -244,7 +306,29 @@ accent, `#66bb6a` / `#ef5350` for up/down).
   the top 3 headlines plus the biggest gap movers, then re-arms. Holidays are skipped
   using the same market clock as the daemon.
 
-## 10. Watchlist
+## 10. API keys
+
+Credentials are **not** in `config.toml` and **not** in the repository. `BA-Projects`
+is public on GitHub, so a key in a tracked file is a key anyone can clone — and a
+leaked key can be used to burn the account's quota or change its plan.
+
+The file is `~/.opendash/secrets.toml`, mode `600`, created from the committed
+`secrets.example.toml` template by `launchd/install.sh`:
+
+```toml
+[providers.twelvedata]
+api_key = "..."
+```
+
+Providers are a map keyed by name, so adding a service needs no code change. The
+daemon resolves the file from `$OPENDASH_SECRETS`, then `$OPENDASH_DIR`, then
+`~/.opendash/secrets.toml`; an explicitly named file that does not exist is an
+error rather than an invitation to fall back to a different one.
+
+Without a key the dashboard runs exactly as before and the PRICE HISTORY tab
+explains what is missing. Nothing else depends on it.
+
+## 11. Watchlist
 
 Three groups, all validated live (quote + news + pre-post data present):
 
@@ -254,7 +338,7 @@ Three groups, all validated live (quote + news + pre-post data present):
 
 Editable in `config.toml`. Tickers not in a group fall into "Other".
 
-## 11. Build order
+## 12. Build order
 
 1. `config` + `marketclock` + Yahoo chart → quote pipeline
 2. Google News RSS + scoring → top-20 pipeline
@@ -262,11 +346,12 @@ Editable in `config.toml`. Tickers not in a group fall into "Other".
 4. Yahoo per-ticker news + ticker tagging + sparklines + ticker timeline
 5. SQLite history
 6. launchd + pre-open alert
+7. secrets file + Twelve Data + PRICE HISTORY tab
 
 Step 5's history is what makes a later event-study ("how did this ticker actually
 move after past similar headlines") possible without re-fetching anything.
 
-## 12. Risks
+## 13. Risks
 
 - The zero-key Yahoo endpoints are unofficial and may throttle or change shape.
   Mitigated by 60 s caching, bounded concurrency, and serving the last SQLite snapshot
@@ -275,3 +360,13 @@ move after past similar headlines") possible without re-fetching anything.
 - Pre-market liquidity is thin before 09:00 ET; small gaps are noise.
 - A `$`-less lowercase alias match is possible for 2–3 letter tickers; the uppercase
   rule in §7 covers the common cases.
+- **The Twelve Data key is the one secret this project holds, and the repo is public.**
+  Mitigated by keeping the file outside the repo, mode 600 checked at load, header-only
+  auth, a redacted `Debug`, and a `.gitignore` backstop — but a key that reaches a
+  commit, a log, or a shared transcript is exposed, and Twelve Data's own dashboard is
+  where a rotation happens. The free tier's 800 credits/day is also a real ceiling: heavy
+  clicking will exhaust it before the end of a day.
+- **Twelve Data's free tier is 8 credits/minute and 800/day.** The PRICE HISTORY tab is
+  therefore click-driven and cached, never polled. Expect a visible "no credits left this
+  minute" during enthusiastic use; the counter is shown in the picker so it is never a
+  surprise.

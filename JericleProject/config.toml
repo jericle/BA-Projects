@@ -2,6 +2,9 @@
 #
 # Every field below is also the built-in default, so delete anything you do not
 # want to override. Times are Eastern Time unless stated otherwise.
+#
+# API keys are NOT here. They live in a secrets file outside the repo — this
+# repository is public. See README.md, "API keys".
 
 port = 8787
 # "localhost" binds both 127.0.0.1 and [::1]. Safari resolves localhost to
@@ -57,3 +60,15 @@ enabled = false
 url = "http://10.0.0.2:52415"
 model = "mlx-community/Qwen3.6-35B-A3B-4bit"
 timeout_ms = 5000
+
+# Twelve Data, for the PRICE HISTORY tab. Tuning only — the key is in the
+# secrets file, never here. This block is safe to commit.
+[twelvedata]
+enabled = true
+base_url = "https://api.twelvedata.com"
+# Intraday bars are only interesting for a minute or two, so the cache is short.
+cache_seconds = 60
+# Credits per minute, matched to the account's plan. The free Basic tier is 8 and
+# 800/day; Grow is 55; Pro is 610. Raising this above the plan's real allowance
+# does not buy speed, it earns HTTP 429s and eventually a suspended key.
+rate_limit_per_minute = 8

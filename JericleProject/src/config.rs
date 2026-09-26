@@ -39,6 +39,34 @@ pub struct Config {
     #[serde(default)]
     pub extra_aliases: HashMap<String, Vec<String>>,
     pub llm: LlmConfig,
+    pub twelvedata: TwelveDataConfig,
+}
+
+/// Twelve Data tuning. Deliberately holds **no key**: credentials live in the
+/// secrets file, outside the repository. This block is safe to commit.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TwelveDataConfig {
+    pub enabled: bool,
+    pub base_url: String,
+    /// How long a fetched series stays valid. Intraday bars are only interesting
+    /// for a minute or two, so this is short by design.
+    pub cache_seconds: i64,
+    /// Credits allowed per minute, matched to the account's plan. The free Basic
+    /// tier is 8; raising this above the plan's real limit earns HTTP 429s (and,
+    /// worse, a suspended key).
+    pub rate_limit_per_minute: u32,
+}
+
+impl Default for TwelveDataConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            base_url: "https://api.twelvedata.com".to_string(),
+            cache_seconds: 60,
+            rate_limit_per_minute: 8,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -78,6 +106,7 @@ impl Default for Config {
             market_queries: default_market_queries(),
             extra_aliases: HashMap::new(),
             llm: LlmConfig::default(),
+            twelvedata: TwelveDataConfig::default(),
         }
     }
 }
