@@ -22,6 +22,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/history/{symbol}", get(api_history))
         .route("/api/series/{symbol}", get(api_series))
         .route("/api/series-meta", get(api_series_meta))
+        .route("/api/strategies/{symbol}", get(api_strategies))
         .route("/health", get(health))
         .with_state(state)
 }
@@ -167,6 +168,170 @@ async fn api_series_meta(State(state): State<Arc<AppState>>) -> impl IntoRespons
             None
         },
     }))
+}
+
+/// A strategy candidate, shaped for the browser.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CandidateView {
+    name: String,
+    bias: String,
+    rationale: String,
+    legs: Vec<crate::strategy::Leg>,
+    metrics: crate::strategy::Metrics,
+    /// The sampled payoff curve, ready to plot.
+    curve: Vec<crate::strategy::PayoffPoint>,
+    score: f64,
+    entry_cost: f64,
+    notes: Vec<String>,
+}
+
+/// Annualised risk-free rate, from the environment so it can move without a rebuild.
+///
+/// Defaults to 4%, the right order of magnitude for USD. Over a few weeks the
+/// discount term is a rounding error beside the volatility term, so this does not
+/// drive any conclusion on the tab.
+fn risk_free_rate() -> f64 {
+    std::env::var("OPENDASH_RISK_FREE")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|r| r.is_finite() && r.abs() < 1.0)
+        .unwrap_or(0.04)
+}
+
+/// Payoff-curve bounds across every candidate for one symbol: wide enough to show a
+/// wide structure's plateau, narrow enough that the interesting region is not
+/// squeezed into a few pixels.
+fn curve_bounds(spot: f64, cands: &[crate::strategy_build::Candidate]) -> (f64, f64) {
+    let mut lo = spot;
+    let mut hi = spot;
+    for c in cands {
+        for l in &c.strategy.legs {
+            lo = lo.min(l.strike);
+            hi = hi.max(l.strike);
+        }
+    }
+    // Pad outside the outermost strikes so the flat regions are visible, and keep a
+    // sane band even when a structure's strikes sit far from spot.
+    let pad = ((hi - lo) * 0.25).max(spot * 0.05);
+    ((lo - pad).max(0.0), hi + pad)
+}
+
+fn err_response(
+    status: axum::http::StatusCode,
+    msg: String,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    (status, axum::Json(json!({ "ok": false, "error": msg })))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct StrategyQuery {
+    /// Yahoo's expiry encoding: unix seconds at midnight UTC.
+    expiry: Option<String>,
+}
+
+/// Ranked defined-risk candidates for one symbol at one expiry.
+///
+/// The expiry is optional; without it the current-month expiry is used, which is the
+/// same one the option-walls card shows, so the two tabs agree by default.
+async fn api_strategies(
+    State(state): State<Arc<AppState>>,
+    Path(symbol): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<StrategyQuery>,
+) -> Result<impl IntoResponse, (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
+    use crate::strategy_build as sb;
+
+    let symbol = clean_symbol(&symbol)
+        .map_err(|st| (st, axum::Json(json!({ "ok": false, "error": "bad symbol" }))))?;
+    let et = crate::marketclock::now_et();
+    let now_ts = et.timestamp();
+
+    let (spot, expiries) = state
+        .options
+        .expiries(&symbol)
+        .await
+        .map_err(|e| err_response(axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    // Only unexpired contracts are offered: a structure on a dead contract has a
+    // probability of profit that is already decided, not modelled.
+    let upcoming: Vec<i64> = expiries.iter().cloned().filter(|ts| *ts > now_ts).collect();
+    if upcoming.is_empty() {
+        return Ok(axum::Json(json!({
+            "ok": true, "symbol": symbol, "spot": spot, "candidates": [], "expiries": [],
+            "reason": "no unexpired contracts listed for this symbol",
+        })));
+    }
+
+    let chosen = q
+        .expiry
+        .and_then(|e| e.parse::<i64>().ok())
+        .filter(|e| upcoming.contains(e))
+        .or_else(|| crate::options::pick_expiry(&expiries, &et).map(|(ts, _)| ts))
+        .unwrap_or(upcoming[0]);
+
+    let chain = state
+        .options
+        .quoted_chain(&symbol, Some(chosen))
+        .await
+        .map_err(|e| err_response(axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    // Yahoo lists an expiry as midnight UTC, but a structure is settled at the
+    // 09:30 ET close. Measuring to midnight instead shortens every probability by
+    // most of a day.
+    let settle = chosen + 13 * 3600 + 1800;
+    let t_years = ((settle - now_ts) as f64 / (365.25 * 86_400.0)).max(0.0);
+
+    let u = sb::Underlying {
+        symbol: symbol.clone(),
+        spot,
+        expiry_ts: chosen,
+        expiry: chrono::DateTime::from_timestamp(chosen, 0)
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_default(),
+        t_years,
+        rate: risk_free_rate(),
+        chain,
+    };
+
+    let built = sb::build_candidates(&u);
+    let (lo, hi) = curve_bounds(spot, &built);
+
+    let views: Vec<CandidateView> = built
+        .iter()
+        .map(|c| CandidateView {
+            name: c.strategy.name.clone(),
+            bias: c.strategy.bias.as_str().to_string(),
+            rationale: c.strategy.rationale.clone(),
+            legs: c.strategy.legs.clone(),
+            metrics: c.metrics.clone(),
+            curve: crate::strategy::payoff_curve(&c.strategy.legs, lo, hi, 121),
+            score: c.score,
+            entry_cost: c.entry_cost,
+            notes: c.notes.clone(),
+        })
+        .collect();
+
+    let expiry_labels: Vec<String> = upcoming
+        .iter()
+        .filter_map(|t| {
+            chrono::DateTime::from_timestamp(*t, 0).map(|d| d.format("%Y-%m-%d").to_string())
+        })
+        .collect();
+
+    Ok(axum::Json(json!({
+        "ok": true,
+        "symbol": symbol,
+        "spot": spot,
+        "expiry": u.expiry,
+        "expiries": expiry_labels,
+        "daysToExpiry": (((chosen - now_ts).max(0) as f64) / 86_400.0 * 10.0).round() as i64 / 10,
+        "curve": { "lo": lo, "hi": hi },
+        "candidates": views,
+    })))
+}
+
+fn json_ok(v: serde_json::Value) -> axum::Json<serde_json::Value> {
+    axum::Json(v)
 }
 
 async fn api_dashboard(State(state): State<Arc<AppState>>) -> impl IntoResponse {

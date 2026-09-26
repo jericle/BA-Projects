@@ -53,18 +53,41 @@ struct ExpiryOptions {
     puts: Vec<Contract>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct Contract {
     strike: f64,
     #[serde(rename = "openInterest", default)]
     open_interest: Option<i64>,
+    #[serde(default)]
     volume: Option<i64>,
+    // Needed by the strategy tab, which prices and scores real structures. A
+    // contract with no two-sided quote, or with no implied volatility, cannot be
+    // traded or modelled — and is rejected downstream rather than guessed at here.
+    #[serde(default)]
+    bid: Option<f64>,
+    #[serde(default)]
+    ask: Option<f64>,
+    #[serde(rename = "impliedVolatility", default)]
+    implied_volatility: Option<f64>,
 }
 
 impl Contract {
     fn row(&self) -> OptionRow {
         OptionRow {
             strike: self.strike,
+            open_interest: self.open_interest.unwrap_or(0),
+            volume: self.volume.unwrap_or(0),
+        }
+    }
+
+    /// Full quote for the strategy engine. A missing field becomes zero so the type
+    /// stays simple; `Quote::tradable` then rejects anything unusable.
+    fn quote(&self) -> crate::strategy_build::Quote {
+        crate::strategy_build::Quote {
+            strike: self.strike,
+            bid: self.bid.unwrap_or(0.0),
+            ask: self.ask.unwrap_or(0.0),
+            iv: self.implied_volatility.unwrap_or(0.0),
             open_interest: self.open_interest.unwrap_or(0),
             volume: self.volume.unwrap_or(0),
         }
@@ -159,6 +182,29 @@ impl YahooOptions {
         ))
     }
 
+    /// A fully quoted chain for the strategy engine, at a chosen expiry.
+    ///
+    /// `expiry` is a unix timestamp as Yahoo lists it, i.e. midnight **UTC** — the
+    /// same encoding `pick_expiry` works in. Passing one from `expiration_dates` is
+    /// therefore safe, and reading the same value as ET would shift the day.
+    pub async fn quoted_chain(
+        &self,
+        symbol: &str,
+        expiry: Option<i64>,
+    ) -> Result<crate::strategy_build::ChainSide> {
+        let chain = self.fetch(symbol, expiry).await?;
+        Ok(crate::strategy_build::ChainSide {
+            calls: chain.call_quotes,
+            puts: chain.put_quotes,
+        })
+    }
+
+    /// Spot price and the list of listed expiries, for choosing a maturity.
+    pub async fn expiries(&self, symbol: &str) -> Result<(f64, Vec<i64>)> {
+        let chain = self.fetch(symbol, None).await?;
+        Ok((chain.spot, chain.expiration_dates))
+    }
+
     async fn fetch(&self, symbol: &str, date: Option<i64>) -> Result<RawChain> {
         // One retry: a cached crumb can go stale, which comes back as "Invalid Crumb".
         let mut last_err = None;
@@ -194,6 +240,10 @@ struct RawChain {
     calls: Vec<OptionRow>,
     puts: Vec<OptionRow>,
     spot: f64,
+    /// The same contracts carrying prices and implied volatility, for the strategy
+    /// tab. The wall code only ever needs strike and open interest.
+    call_quotes: Vec<crate::strategy_build::Quote>,
+    put_quotes: Vec<crate::strategy_build::Quote>,
 }
 
 impl RawChain {
@@ -223,8 +273,18 @@ impl RawChain {
         let options = result.options.remove(0);
         let calls = options.calls.iter().map(Contract::row).collect();
         let puts = options.puts.iter().map(Contract::row).collect();
+        let call_quotes = options.calls.iter().map(Contract::quote).collect();
+        let put_quotes = options.puts.iter().map(Contract::quote).collect();
 
-        Ok(RawChain { expiration_dates, loaded_expiry: expiry, calls, puts, spot })
+        Ok(RawChain {
+            expiration_dates,
+            loaded_expiry: expiry,
+            calls,
+            puts,
+            spot,
+            call_quotes,
+            put_quotes,
+        })
     }
 }
 

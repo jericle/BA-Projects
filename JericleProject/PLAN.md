@@ -25,11 +25,13 @@
   drawing a misleading sparkline.
 * **`deny_unknown_fields` on the config.** Appending a key after a `[table]` header silently
   lands it in that table; a misplaced key is now a hard parse error.
-* **Verification added:** 61 Rust unit tests (calendar, DST, scoring, RSS, option walls,
-  OCC parsing, secrets redaction and permissions, the credit counter, and every Twelve
-  Data parsing quirk above) and `scripts/smoke-ui.mjs`, which runs the page's real
-  JavaScript against the live API payload under a stub DOM and asserts 95 rendering
-  invariants (27 at the time of writing, 66 after the tab milestone, 95 after this one).
+* **Verification added:** 108 Rust unit tests (calendar, DST, scoring, RSS, option
+  walls, OCC parsing, secrets redaction and permissions, the credit counter, every
+  Twelve Data parsing quirk above, and the whole payoff engine including the ratio-leg
+  and sign-convention regressions) and `scripts/smoke-ui.mjs`, which runs the page's
+  real JavaScript against the live API payload under a stub DOM and asserts 119
+  rendering invariants (27 at the time of writing, 66 after the tab milestone, 95
+  after PRICE HISTORY, 119 after this one).
 * **KPI cards added** (second request): row 1 is the session extremes. The first cut used
   "most traded / least traded", which is high volume vs *low* volume and not what a
   High Volume Buy/Sell read is actually for. Corrected to the directional definition:
@@ -50,6 +52,53 @@
   JSON float, which serde will not coerce into `i64`.
 * **OCC strike fields are in thousandths**, confirmed by cross-reference: Yahoo reports
   `NVDA260925C00050000` as strike 50.0, not 500.
+* **OPTION STRATEGIES tab** (v0.4.0). A fourth tab: click any watchlist symbol and get
+  a ranked list of defined-risk structures — bull/bear call and put spreads at three
+  widths, bull/bear put spreads, iron condor, call butterfly, long straddle — with the
+  payoff at expiry plotted, the breakeven(s), max profit, max loss, reward-to-risk,
+  probability of profit, and a per-leg 50%-capture unwind price all marked on one axis.
+  Any listed expiry can be selected.
+* **"Recommend" had to be given an objective, and the objective is deliberately
+  narrow.** Candidates are ranked by `probability of profit × reward-to-risk`. That is
+  a statement about the *shape* of a trade — how often it wins against how much it
+  wins when it does — and not a directional view. It is also not an expected value: the
+  loss case carries no weight, so a structure with a fine ratio and a 20% win rate can
+  still score well. The components are shown next to the score so it is never the only
+  number on the card, and the panel states plainly that it ranks payoff shape rather
+  than direction and is not advice.
+* **Defined-risk only, deliberately.** Every structure in the library has a payoff
+  bounded on both sides, so max profit, max loss and the ratio are exact. A naked short
+  call is excluded precisely because its loss is unbounded and the "reward-to-risk"
+  people quote for it is meaningless. An unbounded side is derived from the **net**
+  call position, not from the presence of a long call — otherwise a bull call spread,
+  long one call and short another, would report unlimited upside, which is the opposite
+  of why anyone buys a spread.
+* **Two maths bugs, both caught by checking against a live chain rather than by
+  inspection.** A ratio leg priced with `signum()` instead of the full position, so a
+  butterfly's 1-2-1 body was treated as 1-1: the payoff then had a net *long* call
+  exposure and ran to infinity, which surfaced as a reward-to-risk of **231** on NVDA
+  and ranked the butterfly first. And `total_credit` negated `net_premium` a second
+  time, so every credit strategy was reported as a debit. Both are now pinned by
+  hand-checked tests, including one asserting no capped structure may report a ratio
+  above 20x — a bound loose enough to be useless in production but tight enough to
+  have caught this.
+* **Extrema are evaluated at the strikes, not on a grid.** A payoff is piecewise linear
+  with kinks at each strike, so its true extremes sit *on* one. Sampling an even grid
+  missed the kink and reported a straddle's max loss as 9.92 instead of 10.00 —
+  a small error, but one that scales with how coarsely the grid samples the strike.
+* **Probability is a stated approximation.** Black-Scholes with the chain's own implied
+  volatility and zero drift, sampled over a lognormal price distribution. Legs on one
+  underlying are **not** independent, so a multi-leg figure is optimistic; the panel
+  says so rather than presenting a number it cannot defend. An exact multivariate
+  probability would be a number nobody could check by eye.
+* **Wings are relative, not dollar amounts.** The same $5 wing is 5% of a $25 name and
+  0.3% of a $1,700 one, so widths are fractions of spot snapped to the nearest listed
+  strike. A hardcoded dollar width would mean something different on every row.
+* **Option data came from Yahoo, not Twelve Data.** Twelve Data's options endpoints 404,
+  and the `options` add-on is a paid tier. Yahoo's chain was already in the project for
+  the walls; this adds `bid`, `ask` and `impliedVolatility` to the contract mapping,
+  which the wall code never needed. A contract with a one-sided or empty quote is
+  excluded rather than priced off half a market.
 * **PRICE HISTORY tab** (v0.3.0). A third tab, next to the other two, showing OHLC bars
   for the watchlist at any of Twelve Data's twelve intervals (`1min` … `1month`), with
   candles or a line and a crosshair readout of O/H/L/C/volume. The list view reuses the
@@ -199,6 +248,8 @@ JericleProject/
 │   ├── pipeline.rs            the refresh cycle: quotes + news in, Dashboard out
 │   ├── llm.rs                 optional local-LLM rerank
 │   ├── secrets.rs             API keys from outside the repo; redacted Debug
+│   ├── strategy.rs            payoff maths, risk metrics, Black-Scholes (pure)
+│   ├── strategy_build.rs      strategy library, strike selection, ranking (pure)
 │   ├── sources/
 │   │   ├── mod.rs             source module list
 │   │   ├── yahoo_chart.rs     pre-market quotes
@@ -284,8 +335,8 @@ accent, `#66bb6a` / `#ef5350` for up/down).
   (highest-volume buy / sell, top gainer / loser) each directly above the option
   walls for that same symbol
 - **Panel tabs** — one tab per panel, each the full page width. `TOP HEADLINES`,
-  `PRE_MARKET` and `PRICE HISTORY`, switchable by click, by digit `1`–`9`, or by a
-  `#tab` URL fragment so a link reopens the same panel
+  `PRE_MARKET`, `PRICE HISTORY` and `OPTION STRATEGIES`, switchable by click, by digit
+  `1`–`9`, or by a `#tab` URL fragment so a link reopens the same panel
 - **Top 20 news** — headline, publisher, age, sentiment chip, tagged tickers, salience
   bar (breakdown on hover)
 - **Pre-market table** — watchlist groups side by side as columns; price, gap %,
@@ -295,6 +346,10 @@ accent, `#66bb6a` / `#ef5350` for up/down).
 - **Price history** — OHLC bars for any watchlist symbol at any of twelve intervals,
   candles or line, crosshair readout of O/H/L/C/volume. Sourced from Twelve Data,
   one credit per opened symbol; the list itself reuses Yahoo data and is free
+- **Option strategies** — click a symbol for ranked defined-risk structures at any
+  listed expiry. Each card carries its payoff at expiry, breakevens, max profit, max
+  loss, reward-to-risk, probability of profit, and a per-leg unwind price, all marked
+  on one axis. From Yahoo's chain, bid/ask mid and implied volatility
 
 ## 9. Automation
 

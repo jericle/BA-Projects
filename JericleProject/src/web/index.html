@@ -359,7 +359,57 @@
   .chartmsg .big { color: var(--muted); font-size: 12.5px; margin-bottom: 6px; }
   .candle { fill: var(--up); }
   .candle.dn { fill: var(--down); }
-</style>
+
+  /* ---------- option strategies ---------- */
+  .strat { display: flex; flex-direction: column; }
+  .scard {
+    border-bottom: 1px solid var(--line); padding: 13px;
+    display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 16px;
+  }
+  @media (max-width: 900px) { .scard { grid-template-columns: 1fr; } }
+  .scard:hover { background: var(--panel-2); }
+  .stitle { font-size: 13.5px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .bias {
+    font-size: 9.5px; letter-spacing: 0.12em; text-transform: uppercase;
+    padding: 1px 5px; border-radius: 2px; border: 1px solid var(--line); color: var(--muted);
+  }
+  .bias.bullish { color: var(--up); border-color: #2c4a30; }
+  .bias.bearish { color: var(--down); border-color: #4a2c2c; }
+  .bias.neutral  { color: var(--accent); border-color: #2a5563; }
+  .bias.volatile { color: var(--warn); border-color: #4a3a20; }
+  .srank {
+    margin-left: auto; font-size: 10.5px; color: var(--dim);
+    font-variant-numeric: tabular-nums; text-align: right;
+  }
+  .srank b { color: var(--accent); font-size: 12.5px; }
+  .srationale { color: var(--muted); font-size: 11px; margin-top: 4px; line-height: 1.45; }
+  .smetrics { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 8px; }
+  .smetrics div { font-size: 10px; color: var(--dim); letter-spacing: 0.05em; }
+  .smetrics b {
+    display: block; font-size: 14px; color: var(--text);
+    font-variant-numeric: tabular-nums; letter-spacing: 0; font-weight: 600;
+  }
+  .smetrics b.up { color: var(--up); }
+  .smetrics b.dn { color: var(--down); }
+  .slegs {
+    margin-top: 8px; font-size: 11px; color: var(--muted);
+    display: flex; flex-wrap: wrap; gap: 4px 10px;
+  }
+  .slegs span { white-space: nowrap; }
+  .slegs i { font-style: normal; color: var(--dim); font-size: 10px; }
+  .splot { min-width: 0; }
+  .splot svg { width: 100%; height: auto; display: block; }
+  .payoff-pos { fill: var(--up); opacity: .13; }
+  .payoff-neg { fill: var(--down); opacity: .13; }
+  .payoff-line { fill: none; stroke: var(--accent); stroke-width: 1.7; }
+  .be-line { stroke: var(--warn); stroke-width: 1; stroke-dasharray: 4 3; }
+  .spot-line { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 3; opacity: .8; }
+  .unwind-line { stroke: var(--warn); stroke-width: 1; stroke-dasharray: 1 3; opacity: .75; }
+  .snote { font-size: 10.5px; color: var(--dim); margin-top: 5px; line-height: 1.45; }
+  .disclaimer {
+    color: var(--dim); font-size: 10.5px; padding: 10px 13px; line-height: 1.5;
+    border-top: 1px solid var(--line); background: #1b2027;
+  }</style>
 </head>
 <body>
 
@@ -394,6 +444,19 @@
     <h2><span>Price history</span><span class="note" id="histNote"></span></h2>
     <div class="tf" id="timeframes"></div>
     <div id="histList"></div>
+  </section>
+
+  <section class="panel" id="panel-strategies" role="tabpanel" aria-label="Option Strategies">
+    <h2><span>Option strategies</span><span class="note" id="stratNote"></span></h2>
+    <div id="stratList"></div>
+    <div class="disclaimer">
+      Payoff at expiry, per share, priced at the bid/ask mid. Ranked by
+      probability of profit &times; reward-to-risk, where probability comes from
+      Black&#8209;Scholes on the chain's own implied volatility with zero drift and is a
+      per-leg approximation — legs on one underlying are not independent, so a
+      multi-leg figure is optimistic. This ranks the shape of a trade, not a
+      direction. Not investment advice.
+    </div>
   </section>
 </main>
 
@@ -444,6 +507,7 @@ const TABS = [
   { id: "headlines", label: "Top Headlines", key: "1", note: "ranked market-moving stories" },
   { id: "premarket", label: "Pre-Market", key: "2", note: "watchlist price action" },
   { id: "history", label: "Price History", key: "3", note: "OHLC bars at any timeframe, Twelve Data" },
+  { id: "strategies", label: "Option Strategies", key: "4", note: "defined-risk structures ranked by payoff shape" },
 ];
 const panelId = (id) => `panel-${id}`;
 let activeTab = TABS[0].id;
@@ -1144,6 +1208,273 @@ function drawSeries() {
 
 let hoverIndex = null;
 
+// ---------------------------------------------------------------- strategies
+// One click on a symbol fetches a ranked list of defined-risk structures, each with
+// its payoff curve already sampled server-side. The chart and every number on the
+// card come from that one payload, so the diagram and the figures cannot disagree.
+let stratData = null;
+let stratSymbol = null;
+let stratToken = 0;
+
+function renderStrategyList() {
+  const host = $("stratList");
+  const quotes = (DATA && DATA.watchlist) || [];
+  $("stratNote").textContent = `${quotes.length} symbols · click for ranked structures`;
+
+  if (!quotes.length) { host.innerHTML = `<div class="empty">No quotes yet.</div>`; return; }
+
+  const byGroup = new Map();
+  for (const q of quotes) {
+    if (!byGroup.has(q.group)) byGroup.set(q.group, []);
+    byGroup.get(q.group).push(q);
+  }
+  let html = "";
+  for (const [group, rows] of byGroup) {
+    html += `<div class="group"><div class="group-title">${esc(group)}</div>`;
+    for (const q of rows) {
+      const chg = q.gapPct != null ? q.gapPct : q.changePct;
+      const sel = stratSymbol === q.symbol ? " sel" : "";
+      const n = stratData && stratData.symbol === q.symbol
+        ? (stratData.candidates || []).length : null;
+      html += `<div class="row${sel}" data-ssym="${esc(q.symbol)}"
+        title="${esc(q.name)} — defined-risk option structures">
+        <div class="sym">${esc(q.symbol)}</div>
+        <div class="px">${q.last > 0 ? money(q.last) : "—"}<small>prev ${q.priorClose > 0 ? money(q.priorClose) : "—"}</small></div>
+        <div class="chg ${cls(chg)}">${chg == null ? "—" : fmtPct(chg)}</div>
+        <div class="nnews">${n == null ? "click to load" : `${n} structures`}</div>
+      </div>`;
+    }
+    html += `</div>`;
+  }
+  host.innerHTML = html;
+  host.querySelectorAll("[data-ssym]").forEach(el =>
+    el.addEventListener("click", () => openStrategies(el.dataset.ssym)));
+}
+
+async function openStrategies(sym) {
+  const token = ++stratToken;
+  const q = (DATA && DATA.watchlist || []).find(x => x.symbol === sym);
+  stratSymbol = sym;
+  renderStrategyList();
+
+  $("dTitle").textContent = q ? `${q.symbol}  ·  ${q.name}` : sym;
+  $("dBody").innerHTML = `<div id="stBody"><div class="chartmsg"><div class="big">loading option structures for ${esc(sym)}…</div>
+    <div>reading strikes, quotes and implied volatility from the chain</div></div></div>`;
+  $("detail").classList.add("on");
+  $("scrim").classList.add("on");
+
+  let d;
+  try {
+    const res = await fetch(`/api/strategies/${encodeURIComponent(sym)}`, { cache: "no-store" });
+    d = await res.json();
+    if (!d.ok) d = { ok: false, error: d.error || `HTTP ${res.status}` };
+  } catch (e) {
+    d = { ok: false, error: String(e) };
+  }
+  if (token !== stratToken) return;
+
+  if (!d.ok) {
+    $("dBody").innerHTML = `<div class="chartmsg"><div class="big">could not load strategies for ${esc(sym)}</div>
+      <div class="warn">${esc(d.error || "unknown error")}</div></div>`;
+    return;
+  }
+
+  stratData = d;
+  renderStrategyList();
+  drawStrategies();
+}
+
+function drawStrategies() {
+  const d = stratData;
+  const host = $("stBody");
+  if (!host) return;
+
+  if (!d || !d.candidates || !d.candidates.length) {
+    host.innerHTML = `<div class="chartmsg"><div class="big">no structures for ${esc(d ? d.symbol : "")}</div>
+      <div>${esc((d && d.reason) || "the chain may be too thin, or every strike is one-sided")}</div></div>`;
+    return;
+  }
+
+  const expSel = (d.expiries || []).length > 1
+    ? `<select id="stExpiry" class="ghost" style="padding:4px 8px">
+         ${d.expiries.map(e => `<option value="${esc(e)}"${e === d.expiry ? " selected" : ""}>${esc(e)}</option>`).join("")}
+       </select>` : "";
+
+  host.innerHTML = `
+    <div class="chartbar">
+      <span class="title">${esc(d.symbol)}</span>
+      <span class="sub">spot <b class="s-mk">${money(d.spot)}</b></span>
+      <span class="sub">expiry <b class="s-mk">${esc(d.expiry)}</b> (${d.daysToExpiry}d)</span>
+      ${expSel}
+      <div class="spacer"></div>
+      <span class="sub">${d.candidates.length} structures, best first</span>
+    </div>
+    <div class="strat">${d.candidates.map((c, i) => stratCard(c, i, d)).join("")}</div>`;
+
+  const sel = $("stExpiry");
+  if (sel) {
+    sel.addEventListener("change", () => loadStrategiesForExpiry(sel.value));
+  }
+}
+
+async function loadStrategiesForExpiry(expiry) {
+  if (!stratSymbol) return;
+  const token = ++stratToken;
+  const host = $("stBody");
+  const prev = host ? host.innerHTML : "";
+  host.innerHTML = `<div class="chartmsg">loading ${esc(expiry)} structures…</div>`;
+  let d;
+  try {
+    const res = await fetch(
+      `/api/strategies/${encodeURIComponent(stratSymbol)}?expiry=${encodeURIComponent(expiry)}`,
+      { cache: "no-store" });
+    d = await res.json();
+  } catch (e) {
+    d = { ok: false, error: String(e) };
+  }
+  if (token !== stratToken) return;
+  if (!d.ok) { host.innerHTML = prev; return; }
+  stratData = d;
+  drawStrategies();
+}
+
+/// One strategy: text on the left, payoff diagram on the right.
+function stratCard(c, rank, d) {
+  const m = c.metrics;
+  const mp = m.maxProfitUnbounded ? "unlimited" : money(m.maxProfit);
+  const ml = m.maxLossUnbounded ? "unlimited" : money(m.maxLoss);
+  const rr = m.rewardRisk == null ? "—" : m.rewardRisk.toFixed(2);
+  // Entry cost: negative means a credit collected, positive a debit paid.
+  const cost = c.entryCost;
+
+  // The ratio size is shown, not just the direction: a butterfly's "short 2" body is
+  // the whole structure, and a leg list reading "short" for both a 1-lot and a 2-lot
+  // hides the very difference that defines the trade.
+  const legs = c.legs.map((l) => {
+    const dir = l.position > 0 ? "long" : "short";
+    const size = Math.abs(l.position);
+    const ratio = size === 1 ? "" : `${size}x-`;
+    const px = l.premium;
+    return `<span title="${esc(l.kind)} ${esc(dir)} ${size}, iv ${(l.iv * 100).toFixed(1)}%">`
+      + `${esc(ratio)}${esc(l.kind)} ${esc(dir)} ${money(l.strike)} @ ${money(Math.abs(px))} ${px < 0 ? "cr" : "db"}</span>`;
+  }).join("");
+
+  const notes = (c.notes || []).map(n => `<div class="snote">${esc(n)}</div>`).join("");
+
+  return `<div class="scard">
+    <div>
+      <div class="stitle">
+        <span class="rank">${rank + 1}</span>
+        <span>${esc(c.name)}</span>
+        <span class="bias ${esc(c.bias)}">${esc(c.bias)}</span>
+        <span class="srank">score<br><b>${c.score.toFixed(2)}</b></span>
+      </div>
+      <div class="srationale">${esc(c.rationale)}</div>
+      <div class="smetrics">
+        <div>PROB OF PROFIT<b>${(m.probProfit * 100).toFixed(1)}%</b></div>
+        <div>REWARD:RISK<b>${esc(rr)}</b></div>
+        <div>MAX PROFIT<b class="up">${esc(mp)}</b></div>
+        <div>MAX LOSS<b class="dn">${esc(ml)}</b></div>
+        <div>${cost < 0 ? "CREDIT" : "DEBIT"}<b>${money(Math.abs(cost))}</b></div>
+        <div>BREAKEVEN${m.breakevens.length > 1 ? "S" : ""}<b>${m.breakevens.length
+          ? m.breakevens.map(money).join(" / ") : "—"}</b></div>
+      </div>
+      <div class="slegs">${legs}</div>
+      ${notes}
+    </div>
+    <div class="splot">${payoffSvg(c, d)}</div>
+  </div>`;
+}
+
+/// The payoff diagram.
+///
+/// The zero line is drawn across the full width and the area above and below it is
+/// shaded, because "where does this make money" is the first question a payoff chart
+/// should answer. Spot, each breakeven and each per-leg unwind marker are overlaid so
+/// the "at which price do I act" points are all on one axis rather than spread across
+/// a separate table.
+function payoffSvg(c, d) {
+  const curve = c.curve || [];
+  if (curve.length < 2) return `<div class="chartmsg">no curve</div>`;
+  const m = c.metrics;
+  const W = 340, H = 150, L = 4, R = 4, T = 8, B = 18;
+
+  const s0 = curve[0].s, s1 = curve[curve.length - 1].s;
+  const xs = curve.map(p => p.s);
+  const ys = curve.map(p => p.pnl);
+  let pMin = Math.min(0, ...ys), pMax = Math.max(0, ...ys);
+  const padP = (pMax - pMin) * 0.08 || 0.5;
+  pMin -= padP; pMax += padP;
+  const sSpan = Math.max(1e-9, s1 - s0);
+
+  const X = (s) => L + ((s - s0) / sSpan) * (W - L - R);
+  const Y = (p) => T + (1 - (p - pMin) / (pMax - pMin)) * (H - T - B);
+  const y0 = Y(0);
+
+  // Positive and negative regions as separate closed paths, so each can be shaded
+  // with its own colour instead of one path with an arbitrary fill.
+  const region = (wantPositive) => {
+    let d = "";
+    let open = false;
+    for (let i = 0; i < curve.length; i++) {
+      const { s, pnl } = curve[i];
+      const above = wantPositive ? pnl > 0 : pnl < 0;
+      if (above && !open) {
+        // Start the region on the zero line, then walk the curve.
+        d += `${d ? "L" : "M"}${X(s).toFixed(1)},${y0.toFixed(1)}`;
+        d += `L${X(s).toFixed(1)},${Y(pnl).toFixed(1)}`;
+        open = true;
+      } else if (above && open) {
+        d += `L${X(s).toFixed(1)},${Y(pnl).toFixed(1)}`;
+      } else if (!above && open) {
+        d += `L${X(s).toFixed(1)},${y0.toFixed(1)}Z`;
+        open = false;
+      }
+    }
+    if (open) d += `L${X(s1).toFixed(1)},${y0.toFixed(1)}Z`;
+    return d;
+  };
+
+  const ticks = [0, 0.5, 1].map((f) => {
+    const s = s0 + sSpan * f;
+    return `<text x="${X(s).toFixed(1)}" y="${H - 5}" fill="var(--dim)" font-size="9"
+      text-anchor="${f === 0 ? "start" : f === 1 ? "end" : "middle"}">${money(s)}</text>`;
+  }).join("");
+
+  // Action markers, de-duplicated by price and labelled.
+  const marks = [];
+  const add = (s, label, cls, dy) => {
+    if (!(s >= s0 && s <= s1)) return;
+    if (marks.some(mk => Math.abs(mk.s - s) < (sSpan) * 0.012)) return;
+    marks.push({ s, label, cls, dy });
+  };
+  add(d.spot, "spot", "spot-line", -3);
+  (m.breakevens || []).forEach(b => add(b, "BE", "be-line", 9));
+  (m.legUnwind || []).forEach(u => add(u.price, "unwind", "unwind-line", 0));
+
+  const markSvg = marks.map((mk, i) => {
+    const x = X(mk.s).toFixed(1);
+    const isSpot = mk.cls === "spot-line";
+    return `<line x1="${x}" y1="${T}" x2="${x}" y2="${H - B}" class="${mk.cls}"/>
+      <text x="${x}" y="${T + (mk.dy >= 0 ? 9 : -1) + (i % 2) * 8}" fill="${isSpot ? "var(--muted)" : "var(--warn)"}"
+        font-size="8" text-anchor="middle">${esc(mk.label)}</text>`;
+  }).join("");
+
+  return `<svg viewBox="0 0 ${W} ${H}" data-payoff="1">
+    <line x1="${L}" y1="${y0.toFixed(1)}" x2="${W - R}" y2="${y0.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>
+    <path d="${region(true)}" class="payoff-pos"/>
+    <path d="${region(false)}" class="payoff-neg"/>
+    <path d="${curve.map((p, i) => `${i ? "L" : "M"}${X(p.s).toFixed(1)},${Y(p.pnl).toFixed(1)}`).join(" ")}" class="payoff-line"/>
+    ${markSvg}
+    ${ticks}
+  </svg>
+  <div class="legend">
+    <span><i style="background:var(--up)"></i>in profit</span>
+    <span><i style="background:var(--warn)"></i>breakeven / unwind</span>
+    <span><i style="background:var(--muted)"></i>spot</span>
+  </div>`;
+}
+
 // ---------------------------------------------------------------- detail
 function openDetail(sym) {
   const q = (DATA.watchlist || []).find(x => x.symbol === sym);
@@ -1268,12 +1599,16 @@ function closeDetail() {
   // Bump the token so an in-flight Twelve Data response cannot reopen or repaint
   // a drawer the user has already dismissed.
   histToken += 1;
+  stratToken += 1;
   selected = null;
   histSelected = null;
   histSeries = null;
   hoverIndex = null;
+  stratData = null;
+  stratSymbol = null;
   renderPrices();
   renderHistoryList();
+  renderStrategyList();
 }
 
 // ---------------------------------------------------------------- chrome
@@ -1322,6 +1657,7 @@ async function load(manual) {
     renderPrices();
     renderKpis();
     renderHistoryList();
+    renderStrategyList();
     if (selected) {
       // keep the open drawer in sync with fresh data
       const keep = selected;

@@ -233,8 +233,9 @@ Rows older than `keep_days` are pruned daily.
 ## Development
 
 ```sh
-cargo test                 # 61 unit tests: calendar, DST, scoring, RSS, option walls, OCC,
-                           # secrets redaction, credit counter, Twelve Data parsing
+cargo test                 # 108 unit tests: calendar, DST, scoring, RSS, option walls, OCC,
+                           # secrets redaction, credit counter, Twelve Data parsing,
+                           # and the whole option payoff engine
 cargo run -- snapshot      # live end-to-end run, prints a text summary
 OPENDASH_VERBOSE=1 cargo run -- snapshot   # per-feed candidate counts
 
@@ -244,9 +245,24 @@ curl -s localhost:8787/api/dashboard -o /tmp/dash.json
 node scripts/smoke-ui.mjs
 ```
 
-Keyboard: `1`–`3` switch panels, `r` refresh, `Esc` close the drawer. The active
+Keyboard: `1`–`4` switch panels, `r` refresh, `Esc` close the drawer. The active
 panel is kept in the URL fragment, so `localhost:8787/#premarket` opens straight
 into the pre-market tab.
+
+## Option strategies
+
+The **OPTION STRATEGIES** tab builds defined-risk option structures for any
+watchlist symbol and ranks them by probability of profit × reward-to-risk. Each
+card plots payoff at expiry and marks the breakeven(s), max profit, max loss and a
+per-leg unwind price on one axis. Any listed expiry can be selected.
+
+The library is defined-risk only, so max profit, max loss and the ratio are exact.
+Probability is Black-Scholes on the chain's own implied volatility with zero drift,
+sampled over a lognormal distribution. Legs on one underlying are not independent,
+so a multi-leg figure is optimistic — the panel says so.
+
+The ranking is about the *shape* of a trade, not a direction, and it is not
+investment advice. Data is Yahoo's option chain, marked at the bid/ask mid.
 
 ## API keys
 

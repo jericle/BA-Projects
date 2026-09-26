@@ -26,8 +26,9 @@ const mkClassList = () => ({
 const KNOWN_IDS = new Set([
   "phaseBadge", "countdown", "clocks", "trending", "refreshBtn",
   "news", "newsNote", "priceNote", "prices", "foot", "tabs",
-  "panel-headlines", "panel-premarket", "panel-history",
+  "panel-headlines", "panel-premarket", "panel-history", "panel-strategies",
   "timeframes", "histList", "histNote", "ohlcRead", "tfCredits", "hsChart", "hsSub",
+  "stratList", "stratNote", "stBody", "stExpiry",
   "scrim", "detail", "dTitle", "dBody", "dClose", "kpiStacks",
 ]);
 
@@ -154,6 +155,7 @@ try {
 ;return {load, openDetail, closeDetail, sparkline, fmtPct, fmtAge, sentClass,
          selectTab, renderTabs, tabFromHash, TABS, get activeTab() { return activeTab; },
          loadSeriesMeta, openHistory, setTimeframe, loadSeries, drawSeries,
+         openStrategies, drawStrategies, renderStrategyList,
          get tfInterval() { return tfInterval; }};`)();
 } catch (e) {
   console.error("script threw during evaluation:\n" + e.stack);
@@ -233,8 +235,8 @@ const checks = [
   ["painted walls no NaN", !/NaN|undefined/.test(painted)],
 
   // ---- panel tabs ----
-  ["a tab per panel", api.TABS.length === 3
-    && ["headlines", "premarket", "history"].every((id) => tabs.includes(`data-tab="${id}"`))],
+  ["a tab per panel", api.TABS.length === 4 && ["headlines", "premarket", "history", "strategies"]
+    .every((id) => tabs.includes(`data-tab="${id}"`))],
   ["tab bar is a tablist", node("tabs").innerHTML.includes('role="tab"')
     && html.includes('role="tablist"')],
   ["each tab names the panel it controls",
@@ -283,6 +285,10 @@ const checks = [
   ["digit 3 jumps to the price history tab", (() => {
     globalThis.fireDocument("keydown", { key: "3" });
     return api.activeTab === "history";
+  })()],
+  ["digit 4 jumps to the option strategies tab", (() => {
+    globalThis.fireDocument("keydown", { key: "4" });
+    return api.activeTab === "strategies";
   })()],
   ["digit 1 jumps back to top headlines", (() => {
     globalThis.fireDocument("keydown", { key: "1" });
@@ -428,6 +434,131 @@ let failEarly = 0;
     ["the page never names the upstream host", !/api\.twelvedata\.com/.test(html)],
   ];
   for (const [name, ok] of secChecks) { if (!ok) failEarly++; console.log(`${ok ? "PASS" : "FAIL"}  ${name}`); }
+}
+
+// ---------------------------------------------------------------------------
+// Option strategies. The canned payload includes a 1-2-1 call butterfly, because
+// the ratio leg is exactly what a rendering bug would hide: a collapsed ratio makes
+// the payoff climb off the top of the chart and the reward-to-risk absurd.
+{
+  const S = 100, DEB = 6.0;
+  const legs = (a) => [
+    { position: 1, kind: "call", strike: 90, premium: 12, iv: 0.5 },
+    { position: -2, kind: "call", strike: 100, premium: -9, iv: 0.5 },
+    { position: 1, kind: "call", strike: 110, premium: 3, iv: 0.5 },
+  ];
+  // Hand-built payoff for that butterfly: flat -6 outside, peaking at +4 at the body.
+  const curve = [];
+  for (let i = 0; i <= 40; i++) {
+    const s = 80 + (140 - 80) * i / 40;
+    const intrinsic = (x, k) => Math.max(0, x - k);
+    const pnl = intrinsic(s, 90) - 2 * intrinsic(s, 100) + intrinsic(s, 110) - DEB;
+    curve.push({ s, pnl });
+  }
+  const stratPayload = {
+    ok: true, symbol: "NVDA", spot: S, expiry: "2026-10-16", daysToExpiry: 21,
+    expiries: ["2026-10-16", "2026-11-20"],
+    curve: { lo: 80, hi: 140 },
+    candidates: [
+      {
+        name: "Call butterfly", bias: "neutral",
+        rationale: "Peaks at the middle strike and decays either side.",
+        legs: legs(),
+        metrics: {
+          maxProfit: 4, maxProfitUnbounded: false, maxLoss: 6, maxLossUnbounded: false,
+          rewardRisk: 0.6666666666666666, probProfit: 0.607,
+          breakevens: [94, 106], netCredit: 0, netDebit: 6, spot: S,
+          legUnwind: [
+            { index: 0, strike: 90, kind: "call", position: 1, price: 135, maxValue: 90 },
+            { index: 1, strike: 100, kind: "call", position: -2, price: 150, maxValue: 100 },
+            { index: 2, strike: 110, kind: "call", position: 1, price: 165, maxValue: 110 },
+          ],
+        },
+        curve, score: 0.405, entryCost: 6, notes: [],
+      },
+      {
+        name: "Bull put spread · moderate", bias: "bullish",
+        rationale: "Collects a credit if the underlying holds above the short strike.",
+        legs: [
+          { position: -1, kind: "put", strike: 95, premium: -4, iv: 0.5 },
+          { position: 1, kind: "put", strike: 85, premium: 1.5, iv: 0.5 },
+        ],
+        metrics: {
+          maxProfit: 2.5, maxProfitUnbounded: false, maxLoss: 7.5, maxLossUnbounded: false,
+          rewardRisk: 0.3333333333333333, probProfit: 0.937,
+          breakevens: [92.5], netCredit: 2.5, netDebit: 0, spot: S,
+          legUnwind: [
+            { index: 0, strike: 95, kind: "put", position: -1, price: 47.5, maxValue: 95 },
+            { index: 1, strike: 85, kind: "put", position: 1, price: 42.5, maxValue: 85 },
+          ],
+        },
+        curve: curve.map((p) => ({ s: p.s, pnl: p.pnl * 0.3 })),
+        score: 0.312, entryCost: -2.5, notes: [],
+      },
+    ],
+  };
+
+  globalThis.fetch = async (path) => {
+    if (path === "/api/dashboard" || path === "/api/refresh") return { json: async () => payload };
+    if (String(path).startsWith("/api/strategies/")) return { json: async () => stratPayload };
+    if (String(path).startsWith("/api/options/")) return { json: async () => optionsPayload };
+    if (path === "/api/series-meta") return { json: async () => ({ ok: true, enabled: false, reason: "off" }) };
+    return { json: async () => ({}) };
+  };
+
+  const list = node("stratList").innerHTML;
+  await api.openStrategies("NVDA");
+  await new Promise((r) => realSetTimeout(r, 60));
+  const body = node("stBody").innerHTML;
+
+  const sc = [
+    ["strategies: list has a row per watchlist symbol",
+      (list.match(/data-ssym=/g) || []).length === payload.watchlist.length],
+    ["strategies: list reuses the watchlist groups",
+      ["AI Core", "Memory", "Power"].every((g) => list.includes(g))],
+    ["strategies: drawer opens on the symbol", body.includes("NVDA")],
+    ["strategies: one card per candidate",
+      (body.match(/class="scard"/g) || []).length === stratPayload.candidates.length],
+    ["strategies: every card has a payoff svg",
+      (body.match(/data-payoff="1"/g) || []).length === stratPayload.candidates.length],
+    ["strategies: probability of profit is shown",
+      body.includes("PROB OF PROFIT") && body.includes("60.7%")],
+    ["strategies: max profit and max loss are shown",
+      body.includes("MAX PROFIT") && body.includes("MAX LOSS")],
+    ["strategies: reward:risk is shown", body.includes("REWARD:RISK")],
+    ["strategies: breakevens are shown", body.includes("94.00") && body.includes("106.00")],
+    ["strategies: credit and debit are both labelled",
+      body.includes("CREDIT") && body.includes("DEBIT")],
+    ["strategies: legs are listed with direction",
+      body.includes("short") && body.includes("long")],
+    ["strategies: profit and loss regions are both shaded",
+      body.includes("payoff-pos") && body.includes("payoff-neg")],
+    ["strategies: spot is marked", body.includes("spot-line")],
+    ["strategies: breakeven markers drawn", body.includes("be-line")],
+    ["strategies: per-leg unwind markers drawn", body.includes("unwind-line")],
+    // The regression guard, in markup: a 2-lot body must render as 2x, and the
+    // rendered card must not carry an implausible ratio.
+    ["strategies: the ratio leg renders its size", body.includes("2x-call")],
+    ["strategies: an expiry selector is offered", body.includes('id="stExpiry"')],
+    ["strategies: a card states its thesis", body.includes("Collects a credit")],
+    ["strategies: no NaN anywhere", !/NaN|undefined/.test(body)],
+    ["strategies: the panel says it is not advice",
+      html.includes("Not investment advice")
+        && html.includes("per-leg approximation")],
+  ];
+  for (const [name, ok] of sc) { if (!ok) failEarly++; console.log(`${ok ? "PASS" : "FAIL"}  ${name}`); }
+
+  // The regression guard: a collapsed ratio leg shows up as an implausible
+  // reward-to-risk, which is what the live data produced before the fix.
+  const rr = stratPayload.candidates[0].metrics.rewardRisk;
+  const absurd = [
+    ["strategies: a butterfly's ratio is plausible", rr < 5],
+    ["strategies: probability stays a probability",
+      stratPayload.candidates.every((c) => c.metrics.probProfit >= 0 && c.metrics.probProfit <= 1)],
+    ["strategies: no candidate claims an unbounded loss",
+      stratPayload.candidates.every((c) => !c.metrics.maxLossUnbounded)],
+  ];
+  for (const [name, ok] of absurd) { if (!ok) failEarly++; console.log(`${ok ? "PASS" : "FAIL"}  ${name}`); }
 }
 
 // ---------------------------------------------------------------------------

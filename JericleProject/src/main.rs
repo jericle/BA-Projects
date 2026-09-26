@@ -17,6 +17,8 @@ mod score;
 mod secrets;
 mod sources;
 mod store;
+mod strategy;
+mod strategy_build;
 mod web;
 
 use std::net::SocketAddr;
